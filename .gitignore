@@ -1,0 +1,10 @@
+WinRE-Relocation-*/
+Winre.wim
+BCD-before
+Operation.log
+State.json
+State.json.tmp
+qa/latest-test-run.log
+qa/latest-test-results.json
+*.tmp
+.DS_Store

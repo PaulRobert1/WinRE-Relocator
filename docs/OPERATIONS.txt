@@ -1,0 +1,264 @@
+WINRE RELOCATOR 3.0.0
+Online recovery relocation and C: extension for supported Windows layouts
+
+STATUS AND VALIDATION
+
+This is a reviewed implementation candidate, not a production certification.
+Its pure planning/identity/capacity helpers, filesystem manifest checks, native
+process wrapper and simulated DiskPart boundary have been tested. The available
+test host is Linux with PowerShell 7.6.9. Real Windows Storage, REAgentC,
+BitLocker, rollback registration and recovery boot operations have NOT been
+executed. Validate on a disposable Windows clone before production use.
+
+The tool NEVER initiates or schedules a reboot. It stops if an online operation
+or prerequisite cannot be satisfied. It cannot guarantee that every Windows
+machine is in a state that allows completion without a prior restart.
+
+WHAT IT DOES
+
+1. Finds C: and the separate WinRE partition currently registered with Windows.
+2. Reads the recovery payload and plans an aligned destination from actual size.
+3. In Auto mode, uses a sufficiently large existing unallocated gap before C:.
+   Otherwise, uses already-unallocated space at the disk end.
+4. Backs up recovery files, image hashes, partition metadata, REAgent state and
+   BCD to a chosen separate local NTFS volume (D: by default).
+5. Creates, formats, populates and verifies the replacement while the original
+   recovery partition still exists and WinRE is still registered there.
+6. Disables old WinRE, checks its staged WIM, registers/enables the replacement,
+   applies the correct MBR/GPT recovery type, hides its temporary drive letter,
+   verifies its registration and rechecks its WIM hash.
+7. Deletes the original recovery partition ONLY after the verified handover.
+8. Extends C: within both the planned boundary and Windows' supported maximum.
+9. Verifies final partition identities and WinRE registration, and resumes
+   BitLocker protection if this tool suspended it.
+
+The tool recreates WinRE at the destination; it is not a sector-moving engine.
+It never moves the start of C:, shrinks C:, moves unrelated partitions, converts
+the disk style, or removes unregistered/OEM partitions to make room.
+
+If recovery is already before C: with no other partition after C:, or already
+occupies the final end extent at adequate size, it preserves that partition and
+either extends C: only or reports NoChange.
+
+QUICK START
+
+Save the standalone script as D:\Move-WinRE-ExtendC.ps1, or use the copy in the
+extracted source bundle. Open 64-bit Windows PowerShell as Administrator.
+Use powershell.exe for execution; this tool refuses pwsh.exe for disk changes.
+
+Preview (default; does not create a backup or request configuration changes):
+
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "D:\Move-WinRE-ExtendC.ps1" -BackupDrive D
+
+Apply the selected Auto plan after validation on a clone and review of preview:
+
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "D:\Move-WinRE-ExtendC.ps1" -BackupDrive D -Placement Auto -Apply
+
+Force disk-end placement even when a front gap exists:
+
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "D:\Move-WinRE-ExtendC.ps1" -BackupDrive D -Placement EndOfDisk -Apply
+
+Require an existing front gap (no fallback; stops if it cannot fit):
+
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "D:\Move-WinRE-ExtendC.ps1" -BackupDrive D -Placement BeforeC
+
+Use E: for backups and reserve at least 2 GiB for the new recovery partition:
+
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "D:\Move-WinRE-ExtendC.ps1" -BackupDrive E -MinimumRecoverySizeMB 2048 -Apply
+
+The example paths can be adjusted to the extracted bundle location. Parameter
+BackupDrive takes a letter only, without a colon. Omitting -Apply always selects
+preview. -PassThru additionally returns a structured result object on success,
+preview or NoChange. Host progress is separate from that object.
+
+PARAMETERS
+
+  -Apply                  Execute; absent means preview.
+  -Placement Auto         Prefer a usable existing front gap, otherwise disk end.
+  -Placement BeforeC      Require front placement; never move C: to create space.
+  -Placement EndOfDisk    Use the disk end; do not use a front gap.
+  -BackupDrive D          Separate fixed, accessible, healthy NTFS data volume.
+  -MinimumRecoverySizeMB  Minimum new size in MiB, 1024 through 8192; default 1024.
+  -PassThru               Emit the result object as well as normal host progress.
+
+The minimum is a floor, not a fixed final size. New recovery size is the larger
+of the requested minimum and payload size plus 350 MiB, rounded up to a MiB.
+After files are copied, at least 250 MiB must remain free in the new volume.
+The tool reserves 1 MiB at the disk end for conservative alignment/metadata.
+
+SUPPORTED AND REFUSED LAYOUTS
+
+Intended execution environment:
+  - 64-bit Windows PowerShell 5.1, Administrator, running Windows on C:.
+  - Windows Storage module plus REAgentC, DiskPart, DISM and BCDEdit.
+  - Healthy writable basic GPT or MBR disk; healthy NTFS Windows/recovery volumes.
+  - Enabled WinRE at the standard \Recovery\WindowsRE path on the Windows disk.
+  - For relocation, registered WinRE is the only partition after C: and the
+    complete new destination fits in space that is ALREADY unallocated.
+  - MBR relocation has a spare primary entry: at most three existing primary
+    partitions. Existing-before-C/ExtendOnly operations do not need a new entry.
+
+Stops rather than guessing when:
+  - Recovery is disabled, ambiguous, missing, on another disk, or nonstandard.
+  - Other partitions would have to be moved/deleted to obtain the requested space.
+  - BeforeC is requested without a sufficiently large existing aligned gap.
+  - MBR has four occupied primary entries, extended/logical partitions, dynamic
+    storage, or capacity above 2 TiB; GPT dynamic or full-entry disks are refused.
+  - The source is boot/system/active, mounted through a letter/folder, or not a
+    correctly typed recovery partition. Other recovery partitions before C: are
+    preserved, not assumed to be safe to delete.
+  - A disk is reported clustered/shared, or its bus type is Storage Spaces.
+  - Known servicing/file-replacement restart indicators are present.
+  - BitLocker is converting/paused/unknown, or the new recovery is encrypted.
+  - Disk, partition, volume, source contents or the planned extent changes.
+  - The backup volume or C: working space is insufficient.
+  - Recovery contents include reparse points or EFS-encrypted entries.
+
+No reboot is a behavior contract: the tool does not call restart/shutdown or
+schedule recovery boot. It is not a promise to bypass pending maintenance.
+
+SPACE REQUIREMENTS AND A 100-GiB MBR EXAMPLE
+
+For relocation:
+  C: free space must be at least the actual Winre.wim size + 256 MiB.
+  Backup-volume free space must be at least twice the original recovery
+  partition size + 256 MiB.
+
+Backups on D: do not redirect REAgentC's staging in
+C:\Windows\System32\Recovery. Windows-native tools can also write their normal
+system logs. The tool's backup, transcript and DISM scratch/logs go to D:.
+The margin is working space, not a guarantee that running services will stop
+consuming C:. Free space is rechecked before the WinRE switch.
+
+For a 523-MiB original recovery partition:
+  Backup-space threshold: 1302 MiB on the selected data volume.
+  If Winre.wim is 400 MiB, C: needs at least 656 MiB free.
+
+The example disk has no gap between the 100-MiB system partition and C:.
+Auto therefore selects EndOfDisk. With a 1024-MiB replacement:
+  Original C size:      85,242,937,344 bytes (about 79.39 GiB)
+  Planned new C size:  106,193,485,824 bytes (about 98.90 GiB)
+  Planned gain:        20,950,548,480 bytes (about 19.51 GiB)
+  Recovery start:     106,299,392,000 bytes
+  Recovery size:        1,073,741,824 bytes
+
+Those are calculations from the example layout. Live type/flag checks, actual
+payload size and Windows' supported maximum remain authoritative at runtime.
+
+BACKUP AND FAILURE BEHAVIOR
+
+Each apply creates a restricted directory such as:
+
+  D:\WinRE-Relocation-20261119-120000-1234abcd\
+
+It contains:
+  Operation.log             Transcript of the operation.
+  State.json                Current/last phase, plan, identities and outcome.
+  Partitions-before.xml     Original partition metadata.
+  WinRE-before.txt          Original REAgentC output.
+  BCD-before                BCDEdit export.
+  ReAgent-before.xml        Original configuration if present.
+  OldPartition\             Original ordinary file/directory payload.
+  Payload-manifest.json     Relative paths, sizes and SHA-256 file hashes.
+  Winre.wim                 Separate recovery-image backup.
+  Winre.sha256.txt          Recovery-image SHA-256.
+  DISM-WimInfo.log           Image-metadata query log.
+
+This is a recovery-files backup, NOT a system/VM backup or raw partition image.
+Root System Volume Information and $RECYCLE.BIN are omitted. The manifest
+verifies ordinary file contents/directories, not original ACLs or alternate
+data streams. The WIM itself is copied byte-for-byte and hash-checked.
+
+Before confirmed handover, a failed switch attempts to restore the original
+WIM and explicitly re-register its original partition. This rollback uses the
+volume GUID path and must be exercised during Windows clone validation.
+
+After the replacement is confirmed, subsequent failure preserves it. There is
+no destructive automatic partition rollback. A failed C: extension can therefore
+leave a working new recovery partition with C: still at its original size.
+
+After any attempted partition creation/deletion or resize, do not blindly rerun
+the tool or remove a partition. Inspect State.json, Operation.log, the live
+partition list and reagentc /info. An unused newly created partition can remain
+after an early failure; State.json records its intended/verified identity.
+The journal is diagnostic evidence, not an automatic resume command.
+
+The tool resumes BitLocker only if it suspended protection that was originally
+On. An originally suspended state is left as it was. Cleanup/log failures are
+isolated so they do not prevent a protection-resumption attempt. Any failure
+to resume is reported; it must be addressed before treating the job as complete.
+
+READ-ONLY POST-CHECKS
+
+  reagentc /info
+  Get-Partition -DiskNumber (Get-Partition -DriveLetter C).DiskNumber |
+      Sort-Object Offset |
+      Format-Table PartitionNumber, DriveLetter, Type, Size, Offset
+  Get-Volume -DriveLetter C | Format-List FileSystem, HealthStatus, Size, SizeRemaining
+
+Successful output means WinRE registration was verified on the intended physical
+partition and C: growth was checked. It does NOT mean recovery has been booted.
+Keep the backup until a planned recovery boot test has succeeded. The tool does
+not schedule that test.
+
+VALIDATION INCLUDED IN THIS BUNDLE
+
+From the extracted bundle, run the non-destructive helper tests with:
+
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\qa\Run-Tests.ps1
+
+The runner parses the main file, checks known PowerShell 5.1 syntax/encoding
+constraints and runs the seven suites in separate processes. It extracts helper
+definitions; it does not execute the main script's Windows disk workflow.
+
+The included validation record shows 200 passing checks, no failures and one
+skipped real-EFS fixture on Linux. It covers:
+  - Example MBR geometry, GPT layouts, front gaps, alignment and refusal cases.
+  - Correct source selection, partition renumbering and stable identity checks.
+  - Working space, recovery sizing and C: growth bounds.
+  - Actual temporary files, known hashes, corruption and reparse-point rejection.
+  - Native exit/error handling and delayed DiskPart selection/failure gates.
+
+The following Windows clone checks remain necessary before production:
+  - MBR and GPT end relocation, including the 100-GiB MBR regression fixture.
+  - A front-gap layout with current partition numbers changing.
+  - WinRE status/location, image access, final C: size and subsequent OS boot.
+  - A later recovery boot test, including access to the Windows installation.
+  - Encrypted C: with protection initially On, Off and already suspended.
+  - Low-space, pending-maintenance and full-MBR-table refusal without mutations.
+  - Faults before handover, during handover and after old deletion, exercising
+    explicit original-registration rollback and preservation of new recovery.
+
+PLACEMENT AND FUTURE UPDATES
+
+Microsoft recommends keeping WinRE immediately after Windows for servicing.
+Front placement is used here only because the requested policy prefers an
+existing suitable front gap. It does not guarantee Windows will never create
+another recovery partition later if a future image outgrows the current one.
+Use -Placement EndOfDisk to follow the normal adjacent-after-Windows layout.
+
+PRIMARY REFERENCES
+
+REAgentC online configuration:
+https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/reagentc-command-line-options
+
+Microsoft WinRE partition procedure and recovery type/attributes:
+https://support.microsoft.com/en-us/servicing/os/windows/2023/06/kb5028997-instructions-to-manually-resize-your-partition-to-install-the-winre-update
+
+Microsoft WinRE resize sample, staging and restart prerequisite guidance:
+https://support.microsoft.com/en-us/servicing/os/windows/2024/02/kb5035679-instructions-to-run-a-script-to-resize-the-recovery-partition-to-install-a-winre-update
+
+Volume extension prerequisites:
+https://learn.microsoft.com/en-us/windows-server/storage/disk-management/extend-a-basic-volume
+
+Partition identity and resize behavior:
+https://learn.microsoft.com/en-us/windows-hardware/drivers/storage/msft-partition
+https://learn.microsoft.com/en-us/windows-hardware/drivers/storage/msft-partition-resize
+
+Recovery placement and update behavior:
+https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/configure-biosmbr-based-hard-drive-partitions
+https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/configure-uefigpt-based-hard-drive-partitions
+https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/windows-recovery-environment--windows-re--technical-reference
+
+The source implements its own bounded, create-first workflow using these APIs;
+it is not an unchanged Microsoft sample or a Microsoft-certified utility.

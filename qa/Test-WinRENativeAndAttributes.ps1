@@ -42,9 +42,12 @@ switch ($Mode) {
 try {
 Check 'Native argument arrays retain switches, paths with spaces and backslashes' {
     $actual = Invoke-NativeChecked $hostExecutable @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $probePath, '-Mode', 'Echo', '/setreimage', '/path', 'Z:\Recovery\WindowsRE', 'C:\Folder with spaces\Winre.wim')
-    $values = @($actual | ConvertFrom-Json)
-    Assert ($values.Count -eq 4) 'Arguments expanded, combined, or lost'
+    # Windows PowerShell 5.1 emits a JSON array as one pipeline object. Wrapping
+    # that pipeline in @() adds a second array layer; direct assignment does not.
+    $values = ConvertFrom-Json -InputObject $actual
+    Assert ($values.Count -eq 4) "Arguments expanded, combined, or lost: $actual"
     Assert ($values[0] -eq '/setreimage') 'First argument changed'
+    Assert ($values[1] -eq '/path') 'Second argument changed'
     Assert ($values[2] -eq 'Z:\Recovery\WindowsRE') 'Windows path changed'
     Assert ($values[3] -eq 'C:\Folder with spaces\Winre.wim') 'Space-containing path split'
 }

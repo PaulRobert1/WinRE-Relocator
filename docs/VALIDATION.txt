@@ -1,247 +1,106 @@
-WinRE Relocator 3.0.0 - validation record
+WinRE Relocator 3.0.1 - validation record
+Date: 2026-11-19
 
-Production Windows execution and recovery boot testing are NOT performed.
-The following are actual helper/filesystem/native-wrapper tests in PowerShell Core 7.6.9 on Linux.
+Release scope
+-------------
+This patch fixes file operations through Windows volume-GUID paths.
+No production disk operation or WinRE recovery boot was performed.
+Tests execute extracted production helpers, disposable filesystem fixtures,
+and simulated storage/native-command interactions. They do not execute the
+main relocation workflow or call real DiskPart/REAgentC/BitLocker operations.
 
-PASS full main-script parse: 0 errors
-PASS known PowerShell 5.1 syntax/encoding compatibility guards
+Verified code and CI
+--------------------
+Code/test commit: d905dbe27d04b4a571d3f07c07adf91da60611f7
+https://github.com/PaulRobert1/WinRE-Relocator/commit/d905dbe27d04b4a571d3f07c07adf91da60611f7
+Successful CI run:
+https://github.com/PaulRobert1/WinRE-Relocator/actions/runs/44552477165
 
-Running Test-WinREHelpers.ps1
-PASS English WinRE location identifies disk and partition
-PASS German WinRE output parses without English labels
-PASS Disabled WinRE without location returns null
-PASS Factory image location is not mistaken for WinRE
-PASS Ambiguous multiple WinRE locations rejected
-PASS Lowercase path components and trailing whitespace parsed
-PASS GPT valid 100 GiB disk has aligned end recovery and growth
-PASS GPT unallocated gap before recovery accepted
-PASS GPT large gap before C does not affect end allocation
-PASS GPT fractional disk capacity rounds recovery offset down
-PASS GPT larger recovery image reservation preserves capacity arithmetic
-PASS MBR valid 100 GiB disk has aligned end recovery and growth
-PASS MBR unallocated gap before recovery accepted
-PASS MBR large gap before C does not affect end allocation
-PASS MBR fractional disk capacity rounds recovery offset down
-PASS MBR larger recovery image reservation preserves capacity arithmetic
-PASS Missing active WinRE location rejected before choosing a deletion source
-PASS RAW partition style rejected
-PASS Different registered WinRE disk rejected
-PASS Different registered WinRE partition rejected
-PASS Missing recovery partition rejected
-PASS Data partition following recovery rejected
-PASS Data partition between C and recovery rejected
-PASS Earlier recovery partition preserved while the registered source is selected
-PASS GPT target without recovery GUID rejected
-PASS MBR target without recovery type rejected
-PASS Recovery target with IsBoot true rejected
-PASS Recovery target with IsSystem true rejected
-PASS Recovery target with IsActive true rejected
-PASS Recovery partition with assigned drive letter rejected
-PASS MBR extended partition type 5 rejected
-PASS MBR extended partition type 15 rejected
-PASS MBR extended partition type 133 rejected
-PASS MBR more than four partition entries rejected
-PASS GPT C partition with non-basic-data type rejected
-PASS MBR C partition with non-NTFS type rejected
-PASS Overlapping recovery and C rejected
-PASS Overlapping earlier partitions rejected
-PASS Recovery beyond disk size rejected
-PASS Mismatched OS disk rejected
-PASS OS metadata inconsistent with listed partition rejected
-PASS Recovery reservation that would shrink C rejected
-PASS No useful growth rejected
-PASS Sub-MiB growth rejected
-RESULT: 44 passed; 0 failed.
-Scope: pure production helper functions and PowerShell syntax only; no Windows storage, REAgentC, DISM, or BitLocker operations executed.
+Windows job: 135659608402
+Runner: windows-2022; Windows PowerShell Desktop 5.1.20348.5773
+CLR: 4.0.30319.42000
+TOTAL: 224 passed; 0 failed; 1 skipped; 0 compatibility failures.
 
-Running Test-ReportedMBRLayout.ps1
-PASS exact wrapped WinRE location
-PASS recovery-directory wraps at every suffix boundary
-PASS exact reported MBR offsets and 1-GiB recovery allocation
+Linux job: 135659609502
+Runner: ubuntu-24.04; PowerShell Core 7.6.10
+TOTAL: 203 passed; 0 failed; 2 skipped; 0 compatibility failures.
 
-ExpectedCSize  : 106193485824
-RecoveryOffset : 106299392000
-RecoverySize   : 1073741824
-TailBytes      : 21476933632
+Both jobs passed the complete main-script parser check and the known
+PowerShell 5.1 syntax/encoding guards. Embedded C# compiled on the actual
+Windows PowerShell 5.1 host. Each suite ran in a separate child process.
 
-Scope: pure helpers only. Recovery MbrType 0x27 and partition flags are assumptions checked against the live machine at runtime.
-RESULT: 3 passed; 0 failed.
+Suite                                      Windows P/F/S   Linux P/F/S
+Test-WinREHelpers.ps1                       44 / 0 / 0     44 / 0 / 0
+Test-ReportedMBRLayout.ps1                    3 / 0 / 0      3 / 0 / 0
+Test-WinREPlacement.ps1                     65 / 0 / 0     65 / 0 / 0
+Test-WinREStagingSpace.ps1                   11 / 0 / 0     11 / 0 / 0
+Test-WinRECapacityHelpers.ps1                19 / 0 / 0     19 / 0 / 0
+Test-WinREIdentityAndManifest.ps1            45 / 0 / 0     44 / 0 / 1
+Test-WinRENativeAndAttributes.ps1            14 / 0 / 0     14 / 0 / 0
+Test-WinREVolumeGuidPaths.ps1                23 / 0 / 1      3 / 0 / 1
 
-Running Test-WinREPlacement.ps1
-PASS GPT omitted Placement automatically uses an exact-sized front gap
-PASS GPT explicit BeforeC uses only the front gap without moving existing partitions
-PASS GPT explicit EndOfDisk overrides a usable front gap
-PASS GPT Auto falls back to end when the front gap is too small
-PASS GPT strict BeforeC reports offline relocation when no front gap fits
-PASS GPT BeforeC reclaims the old recovery when trailing free space is zero
-PASS GPT Auto uses the front gap when zero tail would prevent end placement
-PASS GPT forced EndOfDisk rejects zero-tail layout that would shrink C
-PASS MBR omitted Placement automatically uses an exact-sized front gap
-PASS MBR explicit BeforeC uses only the front gap without moving existing partitions
-PASS MBR explicit EndOfDisk overrides a usable front gap
-PASS MBR Auto falls back to end when the front gap is too small
-PASS MBR strict BeforeC reports offline relocation when no front gap fits
-PASS MBR BeforeC reclaims the old recovery when trailing free space is zero
-PASS MBR Auto uses the front gap when zero tail would prevent end placement
-PASS MBR forced EndOfDisk rejects zero-tail layout that would shrink C
-PASS Exact user MBR geometry defaults to end with exact size/gain limits
-PASS Exact user MBR strict BeforeC identifies need for offline relocation
-PASS Unaligned front gap chooses an aligned fitting location
-PASS Raw gap size is insufficient when alignment consumes the margin
-PASS Nearest fitting front gap is preferred over a farther larger gap
-PASS Farther fitting gap used when the nearest gap is undersized
-PASS Initial front gap reserves first MiB and preserves the system partitions
-PASS Initial raw 1-GiB hole cannot consume reserved first MiB
-PASS Multiple dormant GPT recovery partitions before C are preserved
-PASS Four occupied MBR entries rejected because create-first needs a free slot
-PASS Disabled WinRE rejected even with only one suitable blocker after C
-PASS Registered earlier recovery is not substituted by the blocker after C
-PASS Registered source on another disk rejected
-PASS Overlap between a front-gap boundary and C rejected
-PASS Negative partition size and reversed bounds rejected
-PASS Negative starting offset rejected
-PASS Duplicate partition number rejected before selecting a gap
-PASS OS identity mismatch rejected before selecting a gap
-PASS MBR extended/dynamic partition type 5 rejected for front placement
-PASS MBR extended/dynamic partition type 15 rejected for front placement
-PASS MBR extended/dynamic partition type 133 rejected for front placement
-PASS MBR extended/dynamic partition type 66 rejected for front placement
-PASS MBR disk above 2 TiB rejected despite a usable front gap
-PASS Source recovery marked IsBoot rejected
-PASS Source recovery marked IsSystem rejected
-PASS Source recovery marked IsActive rejected
-PASS Visible source recovery rejected for all placement modes
-PASS Unsupported placement value rejected
-PASS GPT end destination overlapping old recovery rejected despite positive potential gain
-PASS GPT Auto rejects overlapping end destination when there is no front gap
-PASS GPT exact end gap fits create-first without touching old recovery
-PASS MBR end destination overlapping old recovery rejected despite positive potential gain
-PASS MBR Auto rejects overlapping end destination when there is no front gap
-PASS MBR exact end gap fits create-first without touching old recovery
-PASS GPT existing front recovery yields ExtendOnly in Auto and BeforeC
-PASS GPT existing front recovery yields NoChange after C has filled usable space
-PASS GPT strict EndOfDisk rejects moving existing front recovery
-PASS GPT existing end recovery yields ExtendOnly without reallocating it
-PASS GPT existing end recovery yields NoChange when C already reaches it
-PASS GPT strict BeforeC rejects an existing end recovery when no front gap fits
-PASS MBR existing front recovery yields ExtendOnly in Auto and BeforeC
-PASS MBR existing front recovery yields NoChange after C has filled usable space
-PASS MBR strict EndOfDisk rejects moving existing front recovery
-PASS MBR existing end recovery yields ExtendOnly without reallocating it
-PASS MBR existing end recovery yields NoChange when C already reaches it
-PASS MBR strict BeforeC rejects an existing end recovery when no front gap fits
-PASS Sub-MiB unallocated tail reports honest NoChange for existing front recovery
-PASS Sub-MiB internal gap reports honest NoChange for existing end recovery
-PASS Already adequate oversized end recovery retains its full original size
-RESULT: 65 passed; 0 failed.
-Scope: actual pure planner under PowerShell on Linux; no partition, filesystem, boot, or recovery changes executed.
+Windows skip: the new volume-GUID suite could not create its symbolic-link
+fixture on that runner. Existing identity/manifest tests separately passed
+their reparse-point cases. Real EFS-encrypted fixtures passed on Windows.
+Linux skips: real EFS fixture unavailable; real Windows volume-GUID fixture
+requires Windows and its Storage provider.
 
-Running Test-WinREStagingSpace.ps1
-PASS 700 MiB on C accepts 400 MiB WIM with backups on D
-PASS Exact C and backup thresholds accepted
-PASS C one byte below threshold rejected
-PASS Backup one byte below threshold rejected
-PASS Zero WIM rejected
-PASS WIM larger than source partition rejected
-PASS WIM exactly source partition size accepted with sufficient space
-PASS Negative WIM rejected
-PASS Zero recovery partition rejected
-PASS Negative free C space rejected
-PASS Negative free backup space rejected
-RESULT: 11 passed; 0 failed.
-Scope: actual pure capacity helper only; no Windows disk, file migration, or WinRE operations performed.
+Defect and regression evidence
+-------------------------------
+The reported v3.0.0 failure was Get-Item rejecting a recovery image path
+during preflight ("Illegal characters in path"). Inspection confirmed that
+the same raw volume-GUID root was used for metadata, enumeration, hashing,
+copying, and final verification.
 
-Running Test-WinRECapacityHelpers.ps1
-PASS Small recovery payload uses the 1 GiB minimum and UInt64 result
-PASS Large recovery payload reserves image, other files and 350 MiB
-PASS Recovery allocation rounds fractional MiB up
-PASS Explicit recovery minimum honored
-PASS Zero WIM rejected
-PASS Negative WIM rejected
-PASS Negative other payload rejected
-PASS Sub-GiB minimum rejected
-PASS Supported size beyond the growth limit is capped rather than rejected
-PASS Smaller supported size honored
-PASS Fractional supported size rounds absolute end down to MiB
-PASS Unaligned OS start still yields an aligned absolute end
-PASS Unaligned growth limit is rounded down before selecting the target
-PASS Exactly 1 MiB growth accepted
-PASS Supported maximum smaller than current C rejected
-PASS Zero growth rejected
-PASS Sub-MiB growth after rounding rejected
-PASS Growth limit behind current C end rejected
-PASS Growth limit before C start rejected without unsigned wraparound
-RESULT: 19 passed; 0 failed.
-Scope: production pure sizing helpers only; no Windows operations performed.
+The original v3.0.0 GUID manifest succeeded on this modern Windows runner:
+https://github.com/PaulRobert1/WinRE-Relocator/actions/runs/44550927264
+Therefore the original exception was NOT reproduced on that runner, and
+this record does not claim all Windows PowerShell 5.1 hosts reject GUID
+paths. The regression checks exercise the replacement native file adapter
+directly so those operations no longer depend on provider normalization of
+these paths.
 
-Running Test-WinREIdentityAndManifest.ps1
-PASS Identity records the verified disk, physical bounds, and unique partition GUID
-PASS GPT partition renumbering preserves identity
-PASS MBR partition renumbering preserves identity
-PASS Identity rejects changed disk UniqueId
-PASS Identity rejects changed disk Number
-PASS Identity rejects changed disk Size
-PASS Identity rejects changed disk PartitionStyle
-PASS Identity rejects changed partition DiskNumber
-PASS Identity rejects changed partition Offset
-PASS Identity rejects changed partition Size
-PASS Identity rejects changed partition Guid
-PASS Identity rejects a drive letter remapped to another volume GUID
-PASS Windows volume GUID path comparison tolerates case changes
-PASS An unrecorded volume path does not invalidate a new known volume path
-PASS AllowSizeChange permits expected C growth with unchanged identity
-PASS AllowSizeChange does not permit moving the partition start
-PASS AllowSizeChange does not permit replacing the GPT partition
-PASS An empty or whitespace disk UniqueId cannot form a destructive-operation identity
-PASS An empty or whitespace disk UniqueId cannot form a destructive-operation identity
-PASS GPT identity refuses an empty partition GUID
-PASS GPT identity refuses a missing partition GUID property
-PASS MBR identity accepts the absence of a GPT partition GUID
-PASS Manifest includes nested files and empty directories, excluding only root metadata folders
-PASS Manifest SHA256 matches known file bytes
-PASS Manifest roots with or without a trailing separator describe the same files
-PASS Missing manifest root is rejected
-PASS A file cannot be used as the recovery root
-PASS Manifest comparison detects a same-length content change in real files
-PASS Manifest comparison detects a new file in a real directory tree
-PASS Matching manifests are accepted without depending on enumeration order
-PASS Relative path comparison follows Windows case-insensitive semantics
-PASS Missing backup file is rejected
-PASS Unexpected backup file is rejected
-PASS Renaming a file is rejected even when count, length and hash match
-PASS Changed file length is rejected
-PASS Changed file hash is rejected even when length matches
-PASS Replacing a directory with a file is rejected
-PASS Case-equivalent duplicate entries are rejected
-PASS IgnoreHashes permits hash differences while retaining other comparisons
-PASS IgnoreHashes still rejects file-size differences
-PASS IgnoreHashes still rejects unexpected files
-PASS Directory reparse point is rejected rather than followed
-PASS File reparse point is rejected rather than followed
-PASS RootDirectory reparse point is rejected rather than followed
-SKIP EFS rejection: this host/filesystem cannot create a real EFS-encrypted fixture.
-RESULT: 44 passed; 0 failed; 1 skipped.
-Scope: production identity/manifest helpers and disposable filesystem fixtures only. No Windows disk, WinRE, or BitLocker operations executed.
+The new suite was observed failing before the adapter was implemented
+because its seven production helper functions did not yet exist. This is
+a test-first implementation check, not reproduction of the user's exception.
 
-Running Test-WinRENativeAndAttributes.ps1
-PASS Native argument arrays retain switches, paths with spaces and backslashes
-PASS Native success captures both stdout and stderr without throwing
-PASS Native failure throws with exit code and output
-PASS Native call does not change caller ErrorActionPreference
-PASS GPT English detail attribute recognized
-PASS GPT German detail attribute recognized
-PASS GPT required-only attributes rejected
-PASS GPT echoed set command is not treated as verified detail
-PASS GPT longer or malformed attribute value rejected
-Simulated DiskPart result; no Windows operation executed.
-PASS Partition-number selection observes renumbering during the required wait
-PASS Identity change during wait prevents script creation and native dispatch
-PASS Empty validation result cannot fall back to supplied stale commands
-PASS Native DiskPart failure propagates while updating the invocation timestamp
-Simulated DiskPart result; no Windows operation executed.
-PASS Explicit nondeletion commands remain supported without a validation factory
-RESULT: 14 passed; 0 failed.
-Scope: harmless child PowerShell process, production attribute regex, and stateful DiskPart-wrapper simulation with fake wait/native execution. No real DiskPart or Windows storage operation ran; native marshalling is checked only for the current host.
+The first full Windows run of the patch exposed an existing test-harness
+difference in ConvertFrom-Json pipeline-array enumeration on PowerShell 5.1.
+The test now assigns ConvertFrom-Json directly and retains the exact count
+and argument-content assertions. No production native-command wrapper was
+changed to make that test pass. The final Windows run above passed it.
+
+Actual Windows volume-GUID suite output
+---------------------------------------
+Running Test-WinREVolumeGuidPaths.ps1
+PASS GUID string join preserves the existing root without provider normalization
+PASS GUID string join rejects a volume root missing its required separator
+PASS Ordinary string join preserves the normal platform path behavior
+Runtime: Desktop 5.1.20348.5773; LegacyBaseline=False
+Fixture is an ordinary temporary directory accessed through the existing volume GUID. No volume access path is added.
+PASS real volume-GUID recovery manifest and known WIM hash
+PASS Native adapter initialization is idempotent
+PASS Actual volume-GUID root metadata is a directory with the root separator intact
+PASS GUID WIM metadata contains real length, attributes and UTC timestamp
+PASS GUID directory metadata identifies a directory without a trailing slash
+PASS GUID SHA256 returns the known digest as one string
+PASS GUID children enumerate literal entries without dot pseudo-directories
+PASS GUID Unicode and bracket filename remains literal during lookup and enumeration
+PASS GUID and ordinary-path manifests describe identical files and empty directories
+PASS GUID payload copies to an ordinary backup with matching hashes and empty directories
+PASS Ordinary backup restores through a GUID destination and remains byte-identical
+PASS GUID directory creation handles nested empty folders and an existing destination
+PASS GUID-to-GUID standalone copy preserves literal special-file bytes
+PASS Copy-RecoveryFile overwrites a hidden read-only destination like Copy-Item Force
+PASS AllowMissing returns null for a missing GUID file
+PASS AllowMissing returns null for a missing parent directory
+PASS Missing GUID file throws when AllowMissing is absent
+PASS Missing GUID source copy fails without creating a destination
+SKIP reparse fixture: symbolic-link creation is unavailable on this host.
+PASS GUID manifest retains refusal of a real EFS-encrypted file
+PASS GUID payload copy rejects a source encrypted after inventory
+RESULT: 23 passed; 0 failed; 1 skipped.
+Scope: temporary files on an existing Windows volume only. No disk, partition, WinRE, BitLocker, boot, or mount operations executed.
 
 Suite                             Passed Failed Skipped ExitCode
 -----                             ------ ------ ------- --------
@@ -250,8 +109,35 @@ Test-ReportedMBRLayout.ps1             3      0       0        0
 Test-WinREPlacement.ps1               65      0       0        0
 Test-WinREStagingSpace.ps1            11      0       0        0
 Test-WinRECapacityHelpers.ps1         19      0       0        0
-Test-WinREIdentityAndManifest.ps1     44      0       1        0
+Test-WinREIdentityAndManifest.ps1     45      0       0        0
 Test-WinRENativeAndAttributes.ps1     14      0       0        0
+Test-WinREVolumeGuidPaths.ps1         23      0       1        0
 
-TOTAL: 200 passed; 0 failed; 1 skipped; 0 compatibility failures.
-Runtime: Core 7.6.9. These results do not establish Windows storage integration or WinRE bootability.
+Reproduce the checks
+---------------------
+From a repository checkout or the extracted release ZIP:
+
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\qa\Run-Tests.ps1
+
+On Linux:
+
+  pwsh -NoProfile -File ./qa/Run-Tests.ps1
+
+The Windows GUID suite creates a unique temporary directory on an existing
+local volume and obtains that volume's existing GUID path with Get-Volume.
+It neither assigns a drive letter nor changes partitions. It removes its
+own temporary fixture in finally. An EFS or symbolic-link case is reported
+as skipped if the host cannot create the corresponding fixture.
+
+Production validation still required
+--------------------------------------
+These results do not establish Windows storage integration or WinRE bootability.
+Before use on a critical server, validate the complete operation on a disposable
+clone with a recoverable system/VM backup. In particular, test replacement
+partition creation/type/attributes, C: extension, REAgentC staging/registration,
+BitLocker suspend/resume where applicable, failures at the destructive boundary,
+and an actual WinRE boot during a later maintenance window.
+
+The patch adds native FILE access only. It does not establish that native
+REAgentC accepts every GUID-path rollback registration on every Windows build.
+The original rollback command's registration-path behavior is unchanged.

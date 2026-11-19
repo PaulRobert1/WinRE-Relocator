@@ -1,5 +1,44 @@
 # Release notes
 
+## v3.0.1
+
+Compatibility hotfix for recovery-file access through volume GUID paths on Windows PowerShell 5.1.
+
+**[Download Move-WinRE-ExtendC.ps1](https://github.com/PaulRobert1/WinRE-Relocator/releases/download/v3.0.1/Move-WinRE-ExtendC.ps1)**
+
+### Fix
+
+An affected host reported `Get-Item: Illegal characters in path` during v3.0.0 preflight while reading `Winre.wim` through `\\?\Volume{GUID}\...`. Windows accepts that volume GUID syntax, but PowerShell's filesystem provider can involve host-dependent .NET path normalization. The reporting host was not available for testing. The v3.0.0 manifest passed on the modern Windows runner, so the identical failure was not reproduced there.
+
+v3.0.1 uses native Win32 file operations for metadata, directory enumeration, SHA-256 hashing, copying, and rollback directory/file restoration when a volume GUID path is involved. The source and destination volume GUIDs remain the identities used to verify the intended partitions. Preview requires no mount point or drive-letter assignment and makes no .NET/runtime configuration changes.
+
+The fix covers access throughout the workflow, including reading the source payload, verifying the replacement after its temporary letter is removed, and restoring original recovery files during an attempted rollback. Native REAgentC rollback registration still requires integration validation on a disposable Windows clone.
+
+### Retrying the reported preflight failure
+
+Replace the script with v3.0.1, open a fresh elevated 64-bit Windows PowerShell 5.1 window, and rerun preview:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Move-WinRE-ExtendC.ps1" -BackupDrive D
+```
+
+The reported `Get-Item` preflight failure occurs before partition or WinRE changes; no partition cleanup is needed for that failure. Review the preview before adding `-Apply`. If a previous attempt progressed into partition changes, inspect its `State.json`, `Operation.log`, live partition list, and `reagentc /info` before retrying.
+
+### Validation
+
+The runner now executes **eight suites**. [CI run 44552477165](https://github.com/PaulRobert1/WinRE-Relocator/actions/runs/44552477165), for code and tests at commit `d905dbe27d04b4a571d3f07c07adf91da60611f7`, recorded:
+
+| Host | Passed | Failed | Skipped | Compatibility failures |
+|---|---:|---:|---:|---:|
+| Windows Server 2022, Windows PowerShell Desktop 5.1.20348.5773, CLR 4.0.30319.42000 | 224 | 0 | 1 | 0 |
+| Linux, PowerShell Core 7.6.10 | 203 | 0 | 2 | 0 |
+
+Both main-script parses passed. The Windows volume GUID suite passed **23 checks** on real temporary files; its sole skip was an unavailable symbolic-link fixture. Linux skipped the real EFS and Windows-only volume GUID fixtures. The tests also corrected a PowerShell 5.1 JSON-wrapper expectation; that correction required no production-code change.
+
+These results validate helpers and native file fixtures, not the complete disk workflow. **Real partition changes, WinRE registration, BitLocker operations, REAgentC rollback registration, Windows startup after relocation, and recovery boot remain untested.** The reporting host's exact failure was not reproduced. The requirement to validate on a disposable Windows clone before production use still applies.
+
+Microsoft background: [path normalization](https://learn.microsoft.com/en-us/dotnet/framework/migration-guide/mitigation-path-normalization) and [volume GUID paths](https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-volume).
+
 ## v3.0.0
 
 Standalone online WinRE relocation and C: extension for supported basic GPT and MBR layouts.

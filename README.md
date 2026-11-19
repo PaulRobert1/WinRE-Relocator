@@ -4,11 +4,19 @@
 
 WinRE Relocator is a standalone PowerShell script that creates and verifies a replacement recovery partition before deleting the original. It can use an existing unallocated gap before C: or unallocated space at the end of the disk. It never moves the beginning of C: or initiates or schedules a reboot.
 
-**[Download Move-WinRE-ExtendC.ps1 — v3.0.0](https://github.com/PaulRobert1/WinRE-Relocator/releases/download/v3.0.0/Move-WinRE-ExtendC.ps1)**
+**[Download Move-WinRE-ExtendC.ps1 — v3.0.1](https://github.com/PaulRobert1/WinRE-Relocator/releases/download/v3.0.1/Move-WinRE-ExtendC.ps1)**
 
 [Full operations guide](docs/OPERATIONS.txt) · [Validation record](docs/VALIDATION.txt) · [Release notes](RELEASE_NOTES.md)
 
-> **Validation status:** The included tests report **200 passing checks, zero failures, and one skipped EFS fixture** on Linux with PowerShell 7.6.9. Real Windows Storage, REAgentC, BitLocker, rollback registration, and recovery boot operations have not been executed as part of that validation. Validate the tool on a disposable Windows clone before production use.
+> **Validation status:** The eight helper suites passed with **224 checks on Windows PowerShell 5.1** and **203 checks on Linux PowerShell 7**, with zero failures. One Windows fixture and two Linux fixtures were skipped; see the results below. The Windows run exercised real temporary files through volume GUID paths. Real partition changes, WinRE registration, BitLocker operations, REAgentC rollback registration, and recovery boot have **not** been integration tested. Validate the tool on a disposable Windows clone before production use.
+
+## v3.0.1 compatibility fix
+
+v3.0.0 was reported to stop during preflight with `Get-Item: Illegal characters in path` while reading `Winre.wim` through a path such as `\\?\Volume{GUID}\Recovery\WindowsRE\Winre.wim`. Volume GUID paths are valid Windows paths, but filesystem-provider and .NET path handling can differ between Windows PowerShell 5.1 hosts. The reporting host was not available for testing, and the original v3.0.0 manifest passed on the modern Windows runner; the identical exception was not reproduced there.
+
+v3.0.1 reads metadata, enumerates directories, hashes files, copies files, and restores rollback files through native Win32 APIs when a volume GUID path is involved. It preserves the volume GUID used for identity checks. Preview does not mount the recovery partition, assign a drive letter, or change .NET/runtime configuration. See Microsoft's [path-normalization guidance](https://learn.microsoft.com/en-us/dotnet/framework/migration-guide/mitigation-path-normalization) and [volume GUID path documentation](https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-volume) for the platform background.
+
+**Retry after the reported preflight error:** replace the old script with v3.0.1 and run the preview command below in a fresh 64-bit Windows PowerShell 5.1 window. That specific preflight failure occurs before partition or WinRE changes, so it does not require partition cleanup. Review the new preview before adding `-Apply`. For a failure later in an apply operation, follow the journal inspection instructions under [Logs and failure handling](#logs-and-failure-handling).
 
 ## Quick start
 
@@ -22,7 +30,7 @@ Download the script, open **64-bit Windows PowerShell 5.1 as Administrator**, an
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Move-WinRE-ExtendC.ps1" -BackupDrive D
 ```
 
-Preview is the default. It inspects the configuration and reports the selected placement, expected C: growth, and working-space requirements. It does not create a backup or change partitions, WinRE settings, or BitLocker protection.
+Preview is the default. It inspects the configuration and reports the selected placement, expected C: growth, and working-space requirements. It does not create a backup, mount recovery, assign a drive letter, change runtime configuration, or change partitions, WinRE settings, or BitLocker protection.
 
 ### 2. Apply the reviewed plan
 
@@ -192,11 +200,20 @@ The helper suites can also run with PowerShell 7 on Linux:
 pwsh -NoProfile -File ./qa/Run-Tests.ps1
 ```
 
-The runner parses the main script, checks known PowerShell 5.1 syntax and encoding constraints, and runs seven suites in isolated processes. Tests extract helper definitions rather than execute the main Windows disk workflow.
+The runner parses the main script, checks known PowerShell 5.1 syntax and encoding constraints, and runs eight suites in isolated processes. Tests extract helper definitions rather than execute the main Windows disk workflow.
 
-The recorded run contains **200 passes, zero failures, one skipped real-EFS fixture, zero parser errors, and zero known syntax/encoding compatibility failures** under **PowerShell Core 7.6.9 on Linux**. Coverage includes layout planning, stable partition identities, sizing, real temporary-file manifests, native exit handling, and simulated DiskPart selection/failure gates.
+The completed [CI run](https://github.com/PaulRobert1/WinRE-Relocator/actions/runs/44552477165) tested code and tests at commit `d905dbe27d04b4a571d3f07c07adf91da60611f7`:
 
-These results do not establish Windows integration compatibility. Before production deployment, validate on disposable Windows clones, including MBR/GPT relocation, front-gap partition renumbering, BitLocker states, failure recovery, subsequent Windows startup, and a separate WinRE boot test. See the [validation record](docs/VALIDATION.txt) and [full operations guide](docs/OPERATIONS.txt) for the test boundary and remaining Windows checks.
+| Host | Passed | Failed | Skipped | Compatibility failures |
+|---|---:|---:|---:|---:|
+| Windows Server 2022, Windows PowerShell Desktop 5.1.20348.5773 | 224 | 0 | 1 | 0 |
+| Linux, PowerShell Core 7.6.10 | 203 | 0 | 2 | 0 |
+
+Both runs parsed the main script without errors. The Windows host used CLR `4.0.30319.42000`; its new volume GUID suite passed **23 checks** using real temporary files. Its only skip was a symbolic-link fixture whose creation was unavailable. Linux skipped the real EFS fixture and the Windows-only volume GUID fixture.
+
+Coverage includes layout planning, stable partition identities, sizing, temporary-file manifests, native exit handling, and simulated DiskPart selection/failure gates. The new suite exercises native metadata, enumeration, SHA-256 hashing, copying, and directory creation through actual Windows volume GUID paths. It does not recreate a recovery partition or perform a WinRE switch. The original reporting host and its exact failure remain untested.
+
+These results do not establish production readiness or full Windows integration compatibility. Before production deployment, validate on disposable Windows clones, including MBR/GPT relocation, front-gap partition renumbering, BitLocker states, failure recovery and REAgentC rollback registration, subsequent Windows startup, and a separate WinRE boot test. See the [validation record](docs/VALIDATION.txt) and [full operations guide](docs/OPERATIONS.txt) for the test boundary and remaining Windows checks.
 
 ## Microsoft references
 

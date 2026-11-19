@@ -1,0 +1,49 @@
+name: Validate PowerShell helpers
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-powershell-51:
+    name: Windows PowerShell 5.1 volume-GUID regression
+    runs-on: windows-2022
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Require Windows PowerShell 5.1
+        run: |
+          if ($PSVersionTable.PSEdition -ne 'Desktop' -or $PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1) {
+            throw 'The regression must run under Windows PowerShell 5.1.'
+          }
+          $PSVersionTable
+      - name: Reproduce legacy volume-GUID manifest behavior
+        run: |
+          & .\qa\Test-WinREVolumeGuidPaths.ps1 -LegacyBaseline
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  linux-powershell-helpers:
+    name: Linux PowerShell helper tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Run helper suites without the Windows operation
+        run: |
+          & ./qa/Run-Tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

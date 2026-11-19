@@ -24,7 +24,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Move-WinRE-ExtendC.ps1
 .EXAMPLE
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Move-WinRE-ExtendC.ps1 -Placement BeforeC -BackupDrive E
 .NOTES
-Version 3.0.0. Helper logic tested on PowerShell 7/Linux; Windows disk/WinRE/BitLocker
+Version 3.0.1. See the included validation record; Windows disk/WinRE/BitLocker
 integration and boot testing are still required on a disposable clone before production.
 Preview is read-only. -Apply authorizes the selected plan without interactive prompts.
 This is a scoped tool, not a promise that every possible Windows disk layout is supported.
@@ -303,9 +303,255 @@ function Assert-PartitionIdentity {
     if ($Identity.VolumePath -and $VolumePath -ine $Identity.VolumePath) { throw 'The volume GUID path changed.' }
 }
 
+function Initialize-RecoveryFileAccess {
+    # Windows PowerShell 5.1 can send device paths through legacy .NET path
+    # validation even with -LiteralPath. Keep GUID paths out of that provider.
+    if ($null -ne ('WinRERelocator.NativeFilesV301' -as [type])) { return }
+    Add-Type -Language CSharp -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text.RegularExpressions;
+using Microsoft.Win32.SafeHandles;
+
+namespace WinRERelocator {
+    public sealed class RecoveryFileItemV301 {
+        public string FullName { get; set; }
+        public string Name { get; set; }
+        public FileAttributes Attributes { get; set; }
+        public long Length { get; set; }
+        public DateTime LastWriteTimeUtc { get; set; }
+        public bool PSIsContainer { get { return (Attributes & FileAttributes.Directory) != 0; } }
+    }
+    public static class NativeFilesV301 {
+        [StructLayout(LayoutKind.Sequential)]
+        private struct FileTime { public uint Low; public uint High; }
+        [StructLayout(LayoutKind.Sequential)]
+        private struct AttributeData {
+            public uint Attributes;
+            public FileTime CreationTime, LastAccessTime, LastWriteTime;
+            public uint SizeHigh, SizeLow;
+        }
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct FindData {
+            public uint Attributes;
+            public FileTime CreationTime, LastAccessTime, LastWriteTime;
+            public uint SizeHigh, SizeLow, Reserved0, Reserved1;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string Name;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 14)] public string AlternateName;
+        }
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetFileAttributesExW(string path, int level, out AttributeData data);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+        private static extern IntPtr FindFirstFileW(string path, out FindData data);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool FindNextFileW(IntPtr handle, out FindData data);
+        [DllImport("kernel32.dll", ExactSpelling = true, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool FindClose(IntPtr handle);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+        private static extern SafeFileHandle CreateFileW(string path, uint access, uint share,
+            IntPtr security, uint disposition, uint flags, IntPtr template);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CopyFileW(string source, string destination, [MarshalAs(UnmanagedType.Bool)] bool failIfExists);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CreateDirectoryW(string path, IntPtr security);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetFileAttributesW(string path, uint attributes);
+
+        private static int RootLength(string path) {
+            Match match = Regex.Match(path, @"^\\\\\?\\Volume\{[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}\\", RegexOptions.IgnoreCase);
+            if (match.Success) return match.Length;
+            if (Regex.IsMatch(path, @"^[A-Za-z]:\\")) return 3;
+            throw new ArgumentException("Recovery file access requires an absolute volume-GUID or local drive path.");
+        }
+        private static string ValidatePath(string path) {
+            if (String.IsNullOrWhiteSpace(path)) throw new ArgumentException("Recovery path is empty.");
+            int rootLength = RootLength(path);
+            string tail = path.Substring(rootLength).TrimEnd('\\');
+            if (tail.Length != 0) {
+                foreach (string part in tail.Split('\\')) {
+                    if (part.Length == 0 || part == "." || part == ".." ||
+                        part.IndexOfAny(new char[] {'/', ':', '*', '?', '"', '<', '>', '|'}) >= 0)
+                        throw new ArgumentException("Recovery path contains an unsafe component.");
+                    foreach (char c in part) if (c < 32) throw new ArgumentException("Recovery path contains a control character.");
+                }
+            }
+            return tail.Length == 0 ? path.Substring(0, rootLength) : path.Substring(0, rootLength) + tail;
+        }
+        private static Exception Error(string operation, string path, int code) {
+            return new Win32Exception(code, operation + " failed for '" + path + "': " + new Win32Exception(code).Message);
+        }
+        private static RecoveryFileItemV301 Item(string path, uint attributes, uint high, uint low, FileTime modified) {
+            ulong length = ((ulong)high << 32) | low;
+            if (length > Int64.MaxValue) throw new IOException("Recovery file size is out of range.");
+            string namePath = path.TrimEnd('\\');
+            return new RecoveryFileItemV301 {
+                FullName = path, Name = namePath.Substring(namePath.LastIndexOf('\\') + 1),
+                Attributes = (FileAttributes)attributes,
+                Length = (attributes & 0x10) != 0 ? 0 : (long)length,
+                LastWriteTimeUtc = DateTime.FromFileTimeUtc((long)(((ulong)modified.High << 32) | modified.Low))
+            };
+        }
+        public static RecoveryFileItemV301 GetItem(string path, bool allowMissing) {
+            path = ValidatePath(path);
+            AttributeData data;
+            if (!GetFileAttributesExW(path, 0, out data)) {
+                int code = Marshal.GetLastWin32Error();
+                if (allowMissing && (code == 2 || code == 3)) return null;
+                throw Error("Read recovery metadata", path, code);
+            }
+            return Item(path, data.Attributes, data.SizeHigh, data.SizeLow, data.LastWriteTime);
+        }
+        private static void RequireOrdinary(RecoveryFileItemV301 item, bool directory) {
+            if (item.PSIsContainer != directory || (item.Attributes & (FileAttributes.ReparsePoint | FileAttributes.Encrypted)) != 0)
+                throw new IOException("Recovery entry has an unsupported type, reparse point, or EFS encryption: " + item.FullName);
+        }
+        public static RecoveryFileItemV301[] GetChildren(string path) {
+            path = ValidatePath(path);
+            RequireOrdinary(GetItem(path, false), true);
+            string prefix = path.TrimEnd('\\') + "\\";
+            FindData data;
+            IntPtr handle = FindFirstFileW(prefix + "*", out data);
+            if (handle == new IntPtr(-1)) {
+                int code = Marshal.GetLastWin32Error();
+                if (code == 2) return new RecoveryFileItemV301[0];
+                throw Error("Enumerate recovery directory", path, code);
+            }
+            List<RecoveryFileItemV301> items = new List<RecoveryFileItemV301>();
+            try {
+                do {
+                    if (data.Name != "." && data.Name != "..")
+                        items.Add(Item(prefix + data.Name, data.Attributes, data.SizeHigh, data.SizeLow, data.LastWriteTime));
+                } while (FindNextFileW(handle, out data));
+                int code = Marshal.GetLastWin32Error();
+                if (code != 18) throw Error("Continue recovery directory enumeration", path, code);
+            } finally { FindClose(handle); }
+            return items.ToArray();
+        }
+        public static string HashFile(string path) {
+            path = ValidatePath(path);
+            RequireOrdinary(GetItem(path, false), false);
+            // Read-only handle; OPEN_REPARSE_POINT prevents following a replaced file link.
+            using (SafeFileHandle handle = CreateFileW(path, 0x80000000, 1, IntPtr.Zero, 3, 0x08200000, IntPtr.Zero)) {
+                if (handle.IsInvalid) throw Error("Open recovery file", path, Marshal.GetLastWin32Error());
+                using (FileStream stream = new FileStream(handle, FileAccess.Read))
+                using (SHA256 hash = SHA256.Create())
+                    return BitConverter.ToString(hash.ComputeHash(stream)).Replace("-", "");
+            }
+        }
+        public static void CopyFile(string source, string destination) {
+            source = ValidatePath(source); destination = ValidatePath(destination);
+            if (String.Equals(source, destination, StringComparison.OrdinalIgnoreCase)) throw new IOException("Recovery copy source equals destination.");
+            RequireOrdinary(GetItem(source, false), false);
+            RecoveryFileItemV301 existing = GetItem(destination, true);
+            uint originalAttributes = 0; bool cleared = false;
+            if (existing != null) {
+                RequireOrdinary(existing, false);
+                originalAttributes = (uint)existing.Attributes;
+                // CopyFileW refuses an existing Hidden/ReadOnly target; match -Force.
+                uint writable = originalAttributes & ~3U;
+                if (writable == 0) writable = 0x80;
+                if (writable != originalAttributes) {
+                    if (!SetFileAttributesW(destination, writable)) throw Error("Prepare recovery copy target", destination, Marshal.GetLastWin32Error());
+                    cleared = true;
+                }
+            }
+            if (!CopyFileW(source, destination, false)) {
+                int code = Marshal.GetLastWin32Error();
+                if (cleared) SetFileAttributesW(destination, originalAttributes);
+                throw Error("Copy recovery file", destination, code);
+            }
+        }
+        public static void CreateDirectory(string path) {
+            path = ValidatePath(path);
+            RecoveryFileItemV301 existing = GetItem(path, true);
+            if (existing != null) { RequireOrdinary(existing, true); return; }
+            int rootLength = RootLength(path);
+            if (path.Length <= rootLength) throw new IOException("The recovery volume root is unavailable.");
+            int split = path.LastIndexOf('\\');
+            string parent = split < rootLength ? path.Substring(0, rootLength) : path.Substring(0, split);
+            CreateDirectory(parent);
+            if (!CreateDirectoryW(path, IntPtr.Zero)) {
+                int code = Marshal.GetLastWin32Error();
+                if (code != 183) throw Error("Create recovery directory", path, code);
+            }
+            RequireOrdinary(GetItem(path, false), true);
+        }
+    }
+}
+'@ -ErrorAction Stop
+}
+
+function Join-RecoveryPath {
+    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$RelativePath)
+    if ([string]::IsNullOrWhiteSpace($RelativePath) -or $RelativePath -match '^[\\/]|(^|[\\/])\.{1,2}([\\/]|$)|[:\x00-\x1f<>|"*?]') {
+        throw 'Recovery child path must be relative and cannot contain traversal, a stream, or wildcard characters.'
+    }
+    if ($Root.StartsWith('\\?\', [StringComparison]::Ordinal)) {
+        if ($Root -notmatch '^\\\\\?\\Volume\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}\\') {
+            throw 'Recovery device path is not a valid volume-GUID path.'
+        }
+        return $Root.TrimEnd('\') + '\' + $RelativePath.Replace('/', '\')
+    }
+    Join-Path -Path $Root -ChildPath $RelativePath
+}
+
+function Get-RecoveryFileItem {
+    param([Parameter(Mandatory)][string]$LiteralPath, [switch]$AllowMissing)
+    if ($LiteralPath.StartsWith('\\?\', [StringComparison]::Ordinal)) {
+        Initialize-RecoveryFileAccess
+        return [WinRERelocator.NativeFilesV301]::GetItem($LiteralPath, [bool]$AllowMissing)
+    }
+    try { Get-Item -LiteralPath $LiteralPath -Force -ErrorAction Stop }
+    catch [System.Management.Automation.ItemNotFoundException] { if (-not $AllowMissing) { throw } }
+}
+
+function Get-RecoveryChildItem {
+    param([Parameter(Mandatory)][string]$LiteralPath)
+    if ($LiteralPath.StartsWith('\\?\', [StringComparison]::Ordinal)) {
+        Initialize-RecoveryFileAccess
+        return [WinRERelocator.NativeFilesV301]::GetChildren($LiteralPath)
+    }
+    Get-ChildItem -LiteralPath $LiteralPath -Force -ErrorAction Stop
+}
+
+function Get-RecoveryFileHash {
+    param([Parameter(Mandatory)][string]$LiteralPath)
+    if ($LiteralPath.StartsWith('\\?\', [StringComparison]::Ordinal)) {
+        Initialize-RecoveryFileAccess
+        return [WinRERelocator.NativeFilesV301]::HashFile($LiteralPath)
+    }
+    (Get-FileHash -LiteralPath $LiteralPath -Algorithm SHA256 -ErrorAction Stop).Hash
+}
+
+function Copy-RecoveryFile {
+    param([Parameter(Mandatory)][string]$LiteralPath, [Parameter(Mandatory)][string]$Destination)
+    if ($LiteralPath.StartsWith('\\?\', [StringComparison]::Ordinal) -or $Destination.StartsWith('\\?\', [StringComparison]::Ordinal)) {
+        Initialize-RecoveryFileAccess
+        [WinRERelocator.NativeFilesV301]::CopyFile($LiteralPath, $Destination)
+    } else { Copy-Item -LiteralPath $LiteralPath -Destination $Destination -Force -ErrorAction Stop }
+}
+
+function New-RecoveryDirectory {
+    param([Parameter(Mandatory)][string]$LiteralPath)
+    if ($LiteralPath.StartsWith('\\?\', [StringComparison]::Ordinal)) {
+        Initialize-RecoveryFileAccess
+        [WinRERelocator.NativeFilesV301]::CreateDirectory($LiteralPath)
+    } else { New-Item -ItemType Directory -Path $LiteralPath -Force -ErrorAction Stop | Out-Null }
+}
+
 function Get-RecoveryManifest {
     param([Parameter(Mandatory)][string]$Root, [switch]$WithHash)
-    $rootItem = Get-Item -LiteralPath $Root -Force -ErrorAction Stop
+    $rootItem = Get-RecoveryFileItem -LiteralPath $Root
     if (-not $rootItem.PSIsContainer -or ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
         throw 'Recovery root must be a real directory, not a reparse point.'
     }
@@ -314,7 +560,7 @@ function Get-RecoveryManifest {
     $pending.Push($rootItem.FullName)
     while ($pending.Count -gt 0) {
         $directory = $pending.Pop()
-        foreach ($entry in @(Get-ChildItem -LiteralPath $directory -Force -ErrorAction Stop)) {
+        foreach ($entry in @(Get-RecoveryChildItem -LiteralPath $directory)) {
             $relative = $entry.FullName.Substring($rootPrefix.Length)
             if ($directory.TrimEnd([char[]]'\/') -ieq $rootItem.FullName.TrimEnd([char[]]'\/') -and
                 $entry.Name -in @('System Volume Information', '$RECYCLE.BIN')) { continue }
@@ -327,8 +573,8 @@ function Get-RecoveryManifest {
             else {
                 $length = [long]$entry.Length
                 if ($WithHash) {
-                    $hash = (Get-FileHash -LiteralPath $entry.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
-                    $after = Get-Item -LiteralPath $entry.FullName -Force
+                    $hash = Get-RecoveryFileHash -LiteralPath $entry.FullName
+                    $after = Get-RecoveryFileItem -LiteralPath $entry.FullName
                     if ($after.Length -ne $length -or $after.LastWriteTimeUtc -ne $entry.LastWriteTimeUtc) {
                         throw "Recovery file changed while it was being verified: $relative."
                     }
@@ -521,13 +767,13 @@ function Set-OperationStage {
 function Copy-RecoveryPayload {
     param([string]$Source, [string]$Destination, [object[]]$Manifest)
     foreach ($entry in @($Manifest | Sort-Object @{E={$_.RelativePath.Length}}, RelativePath)) {
-        $from = Join-Path $Source $entry.RelativePath
-        $to = Join-Path $Destination $entry.RelativePath
-        $current = Get-Item -LiteralPath $from -Force -ErrorAction Stop
+        $from = Join-RecoveryPath $Source $entry.RelativePath
+        $to = Join-RecoveryPath $Destination $entry.RelativePath
+        $current = Get-RecoveryFileItem -LiteralPath $from
         if ($current.Attributes -band [IO.FileAttributes]::ReparsePoint -or
             $current.Attributes -band [IO.FileAttributes]::Encrypted) { throw 'Recovery source changed to an unsupported entry.' }
-        if ($entry.IsDirectory) { New-Item -ItemType Directory -Path $to -Force | Out-Null }
-        else { Copy-Item -LiteralPath $from -Destination $to -Force -ErrorAction Stop }
+        if ($entry.IsDirectory) { New-RecoveryDirectory -LiteralPath $to }
+        else { Copy-RecoveryFile -LiteralPath $from -Destination $to }
     }
 }
 
@@ -566,25 +812,26 @@ function Restore-OriginalWinRE {
     # This is used only before old-partition deletion and before a confirmed handover.
     $old = Get-CurrentPartition $script:oldIdentity
     $root = [string](Get-SinglePartitionVolume $old).Path
-    $dir = Join-Path $root 'Recovery\WindowsRE'
-    $wim = Join-Path $dir 'Winre.wim'
+    $dir = Join-RecoveryPath $root 'Recovery\WindowsRE'
+    $wim = Join-RecoveryPath $dir 'Winre.wim'
     try {
         $existingInfo = Assert-WinREOnIdentity $script:oldIdentity
-        if ((Test-Path -LiteralPath $wim -PathType Leaf) -and
-            (Get-FileHash -LiteralPath $wim -Algorithm SHA256).Hash -eq $script:wimHash) {
+        $existingWim = Get-RecoveryFileItem -LiteralPath $wim -AllowMissing
+        if ($null -ne $existingWim -and -not $existingWim.PSIsContainer -and
+            (Get-RecoveryFileHash -LiteralPath $wim) -eq $script:wimHash) {
             Write-Host $existingInfo
             Write-Host 'Original WinRE remains correctly registered with the verified image.'
             $script:state.OriginalWinRERestored = $true
             return
         }
     } catch { Write-Host 'Restoring the original WinRE registration explicitly.' }
-    New-Item -ItemType Directory -Path $dir -Force | Out-Null
-    Copy-Item -LiteralPath $script:backupWim -Destination $wim -Force
-    if ((Get-FileHash -LiteralPath $wim -Algorithm SHA256).Hash -ne $script:wimHash) { throw 'Original WinRE image restore failed verification.' }
+    New-RecoveryDirectory -LiteralPath $dir
+    Copy-RecoveryFile -LiteralPath $script:backupWim -Destination $wim
+    if ((Get-RecoveryFileHash -LiteralPath $wim) -ne $script:wimHash) { throw 'Original WinRE image restore failed verification.' }
     # An earlier failed enable may have left a different location active.
     Write-Host (Invoke-NativeChecked $script:reagentc @('/disable'))
     # Disable can move the image again; restore it after disabling as well.
-    Copy-Item -LiteralPath $script:backupWim -Destination $wim -Force
+    Copy-RecoveryFile -LiteralPath $script:backupWim -Destination $wim
     Write-Host (Invoke-NativeChecked $script:reagentc @('/setreimage', '/path', $dir))
     Write-Host (Invoke-NativeChecked $script:reagentc @('/enable'))
     Write-Host (Assert-WinREOnIdentity $script:oldIdentity)
@@ -611,7 +858,7 @@ $disableAttempted = $false; $newWinREVerified = $false; $creationAttempted = $fa
 $deletionAttempted = $false; $resizeAttempted = $false; $failure = $null; $finished = $false
 $mutex = $null; $mutexOwned = $false; $bitLockerVolume = $null; $finalC = $null
 $script:state = [ordered]@{
-    ToolVersion = '3.0.0'; ComputerName = $env:COMPUTERNAME; StartedUtc = [DateTime]::UtcNow.ToString('o')
+    ToolVersion = '3.0.1'; ComputerName = $env:COMPUTERNAME; StartedUtc = [DateTime]::UtcNow.ToString('o')
     UpdatedUtc = ''; Stage = 'preflight'; Result = 'InProgress'; RequestedPlacement = $Placement
     Plan = $null; OriginalC = $null; OriginalRecovery = $null; NewRecovery = $null
     CreationAttempted = $false; NewWinREVerified = $false; OldDeletionAttempted = $false; OldDeleted = $false
@@ -655,9 +902,10 @@ try {
     if ($oldVolume.FileSystem -ne 'NTFS' -or [string]$oldVolume.HealthStatus -ne 'Healthy') { throw 'Registered recovery must be healthy NTFS.' }
     $script:oldIdentity = New-PartitionIdentity $script:disk $oldRecovery ([string]$oldVolume.Path)
     $oldRoot = [string]$oldVolume.Path
-    $sourceWim = Join-Path $oldRoot 'Recovery\WindowsRE\Winre.wim'
-    if (-not (Test-Path -LiteralPath $sourceWim -PathType Leaf)) { throw 'The registered recovery image cannot be read. Nothing will be deleted.' }
-    $wimBytes = [long](Get-Item -LiteralPath $sourceWim -Force).Length
+    $sourceWim = Join-RecoveryPath $oldRoot 'Recovery\WindowsRE\Winre.wim'
+    $sourceWimItem = Get-RecoveryFileItem -LiteralPath $sourceWim -AllowMissing
+    if ($null -eq $sourceWimItem -or $sourceWimItem.PSIsContainer) { throw 'The registered recovery image cannot be read. Nothing will be deleted.' }
+    $wimBytes = [long]$sourceWimItem.Length
     $inventory = @(Get-RecoveryManifest -Root $oldRoot)
     $payloadBytes = [long]0
     foreach ($entry in $inventory) { if (-not $entry.IsDirectory) { $payloadBytes += $entry.Length } }
@@ -665,7 +913,7 @@ try {
     $plan = Get-LayoutPlan $script:disk $c $script:originalParts $location $recoveryBytes -Placement $Placement
     $script:state.Plan = $plan | Select-Object Action, SelectedPlacement, RecoveryOffset, RecoverySize, CGrowthLimit, ExpectedCSize, GainBytes, PlacementReason
     $script:state.OriginalC = $script:cIdentity; $script:state.OriginalRecovery = $script:oldIdentity
-    Write-Host "`nWinRE Relocator 3.0.0 - $(if ($Apply) {'APPLY'} else {'PREVIEW'})" -ForegroundColor Cyan
+    Write-Host "`nWinRE Relocator 3.0.1 - $(if ($Apply) {'APPLY'} else {'PREVIEW'})" -ForegroundColor Cyan
     Write-Host "Disk $($script:disk.Number) ($($script:disk.PartitionStyle)); requested placement: $Placement"
     $script:originalParts | Format-Table PartitionNumber, DriveLetter, Type,
         @{N='MiB';E={[Math]::Round($_.Size / 1MB, 1)}}, Offset -AutoSize | Out-Host
@@ -747,7 +995,7 @@ try {
     $script:backupWim = Join-Path $script:workDir 'Winre.wim'
     Copy-Item -LiteralPath (Join-Path $payload 'Recovery\WindowsRE\Winre.wim') -Destination $script:backupWim -Force
     $script:wimHash = (Get-FileHash -LiteralPath $script:backupWim -Algorithm SHA256).Hash
-    if ($script:wimHash -ne (Get-FileHash -LiteralPath $sourceWim -Algorithm SHA256).Hash) { throw 'Recovery image backup hash mismatch.' }
+    if ($script:wimHash -ne (Get-RecoveryFileHash -LiteralPath $sourceWim)) { throw 'Recovery image backup hash mismatch.' }
     $script:wimHash | Set-Content -LiteralPath (Join-Path $script:workDir 'Winre.sha256.txt') -Encoding ASCII
     $scratch = Join-Path $script:workDir 'DISM-Scratch'
     New-Item -ItemType Directory -Path $scratch | Out-Null
@@ -841,8 +1089,8 @@ try {
         Write-Host (Assert-WinREOnIdentity $script:newIdentity)
         Remove-NewTemporaryAccess
         Write-Host (Assert-WinREOnIdentity $script:newIdentity)
-        $newWim = Join-Path $script:newIdentity.VolumePath 'Recovery\WindowsRE\Winre.wim'
-        if ((Get-FileHash -LiteralPath $newWim -Algorithm SHA256).Hash -ne $script:wimHash) { throw 'The enabled replacement WinRE image differs from the backup.' }
+        $newWim = Join-RecoveryPath $script:newIdentity.VolumePath 'Recovery\WindowsRE\Winre.wim'
+        if ((Get-RecoveryFileHash -LiteralPath $newWim) -ne $script:wimHash) { throw 'The enabled replacement WinRE image differs from the backup.' }
         $newWinREVerified = $true; $script:state.NewWinREVerified = $true
         Write-OperationState
 

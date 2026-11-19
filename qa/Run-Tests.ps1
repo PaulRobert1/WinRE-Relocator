@@ -3,7 +3,7 @@
 Runs only read-only helper tests and temporary-file fixtures, never the main operation.
 .DESCRIPTION
 The main script is parsed, checked for known post-5.1 syntax and encoding hazards,
-then the seven explicitly listed test suites run in isolated PowerShell processes.
+then the explicitly listed test suites run in isolated PowerShell processes.
 No disk partition, WinRE, BitLocker, boot, or reboot operations are executed.
 #>
 param([string]$ScriptPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'Move-WinRE-ExtendC.ps1'))
@@ -57,7 +57,8 @@ $testFiles = @(
     'Test-WinREStagingSpace.ps1',
     'Test-WinRECapacityHelpers.ps1',
     'Test-WinREIdentityAndManifest.ps1',
-    'Test-WinRENativeAndAttributes.ps1'
+    'Test-WinRENativeAndAttributes.ps1',
+    'Test-WinREVolumeGuidPaths.ps1'
 )
 $results = @()
 foreach ($testFile in $testFiles) {

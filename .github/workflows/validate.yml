@@ -26,9 +26,9 @@ jobs:
             throw 'The regression must run under Windows PowerShell 5.1.'
           }
           $PSVersionTable
-      - name: Reproduce legacy volume-GUID manifest behavior
+      - name: Run helper suites and real temporary volume-GUID fixtures
         run: |
-          & .\qa\Test-WinREVolumeGuidPaths.ps1 -LegacyBaseline
+          & .\qa\Run-Tests.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   linux-powershell-helpers:

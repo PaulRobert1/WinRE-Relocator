@@ -2,12 +2,13 @@ param([string]$ScriptPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'Move-
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 
-# Parse and load only the four helpers under test. Never execute the production
+# Parse and load only the helpers under test and their file-access dependencies. Never execute the production
 # script body, its platform checks, or its disk/WinRE/BitLocker operations.
 $tokens = $null; $errors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($ScriptPath, [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw ($errors | Out-String) }
-$helperNames = @('New-PartitionIdentity', 'Assert-PartitionIdentity', 'Get-RecoveryManifest', 'Assert-RecoveryManifest')
+$helperNames = @('New-PartitionIdentity', 'Assert-PartitionIdentity', 'Get-RecoveryManifest', 'Assert-RecoveryManifest',
+    'Initialize-RecoveryFileAccess', 'Get-RecoveryFileItem', 'Get-RecoveryChildItem', 'Get-RecoveryFileHash')
 $missing = @()
 foreach ($name in $helperNames) {
     $matches = @($ast.FindAll({ param($node)

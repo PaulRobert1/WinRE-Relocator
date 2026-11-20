@@ -1,12 +1,13 @@
-WINRE RELOCATOR 3.0.1
+WINRE RELOCATOR 3.0.2
 Online recovery relocation and C: extension for supported Windows layouts
 
 STATUS AND VALIDATION
 
 This is a reviewed implementation candidate, not a production certification.
-The eight helper suites passed 224 checks on Windows PowerShell 5.1 and 203 on
+The nine helper suites passed 318 checks on Windows PowerShell 5.1 and 297 on
 Linux PowerShell 7, with zero failures. One Windows fixture and two Linux
-fixtures were skipped; host details and the test boundary appear below.
+fixtures were skipped. The pending-maintenance suite uses mocked registry reads.
+Host details and the test boundary appear below and in VALIDATION.txt.
 Native file operations were exercised through actual Windows volume GUID paths
 using temporary files. Real partition changes, WinRE registration, BitLocker
 operations, REAgentC rollback registration and recovery boot have NOT been
@@ -15,6 +16,23 @@ integration tested. Validate on a disposable Windows clone before production.
 The tool NEVER initiates or schedules a reboot. It stops if an online operation
 or prerequisite cannot be satisfied. It cannot guarantee that every Windows
 machine is in a state that allows completion without a prior restart.
+
+VERSION 3.0.2 PENDING-CLEANUP OPTION
+
+The new -AllowPendingCleanup switch permits only recognized pending deletion
+patterns after both PendingFileRenameOperations and PendingFileRenameOperations2
+are inspected. The default still blocks queued file operations when a partition
+change is planned, including preview. The option must be supplied separately
+for preview and apply; it is not remembered between runs.
+
+Pending CBS or Windows Update restart flags always block the run. Replacements
+or renames with nonempty destinations, unknown paths and malformed queue data
+also block it. The queue classifications do not certify completed maintenance,
+printer-driver health or overall readiness for disk changes.
+
+The tool preserves both registry queue values and the queued files. It does not
+execute or cancel the queued deletions. See PENDING MAINTENANCE AND CLEANUP QUEUES
+for accepted patterns, commands and refusal conditions.
 
 VERSION 3.0.1 COMPATIBILITY FIX
 
@@ -29,7 +47,7 @@ and .NET path handling can differ between hosts. The reporting host was not
 available for testing, and the original v3.0.0 manifest passed on the modern
 Windows runner; the identical exception was not reproduced there.
 
-Version 3.0.1 uses native Win32 APIs for metadata, directory enumeration, file
+Since version 3.0.1, the tool uses native Win32 APIs for metadata, enumeration,
 hashing, copying and rollback directory/file restoration when a volume GUID
 path is involved. It keeps the volume GUID used for identity checks unchanged.
 This covers the source payload, final verification after the replacement's
@@ -39,7 +57,7 @@ Native REAgentC rollback registration still needs Windows clone validation.
 Preview does not mount recovery, assign a drive letter, or change .NET/runtime
 configuration. Ordinary drive-letter paths retain their normal file access.
 
-To retry this specific preflight error, replace the script with v3.0.1 and open
+To retry this specific preflight error, replace the script with v3.0.2 and open
 a fresh elevated 64-bit Windows PowerShell 5.1 window. Run the preview command
 in QUICK START, then review its plan before adding -Apply. This preflight
 failure occurs before partition or WinRE changes and needs no partition cleanup.
@@ -111,6 +129,8 @@ PARAMETERS
   -Placement EndOfDisk    Use the disk end; do not use a front gap.
   -BackupDrive D          Separate fixed, accessible, healthy NTFS data volume.
   -MinimumRecoverySizeMB  Minimum new size in MiB, 1024 through 8192; default 1024.
+  -AllowPendingCleanup    Permit only the recognized pending-deletion exception.
+                          Supply it separately on preview and apply commands.
   -PassThru               Emit the result object as well as normal host progress.
 
 The minimum is a floor, not a fixed final size. New recovery size is the larger
@@ -140,7 +160,8 @@ Stops rather than guessing when:
     correctly typed recovery partition. Other recovery partitions before C: are
     preserved, not assumed to be safe to delete.
   - A disk is reported clustered/shared, or its bus type is Storage Spaces.
-  - Known servicing/file-replacement restart indicators are present.
+  - Windows servicing restart flags are present, or queued file operations do
+    not pass the explicitly selected pending-cleanup exception.
   - BitLocker is converting/paused/unknown, or the new recovery is encrypted.
   - Disk, partition, volume, source contents or the planned extent changes.
   - The backup volume or C: working space is insufficient.
@@ -148,6 +169,81 @@ Stops rather than guessing when:
 
 No reboot is a behavior contract: the tool does not call restart/shutdown or
 schedule recovery boot. It is not a promise to bypass pending maintenance.
+
+PENDING MAINTENANCE AND CLEANUP QUEUES
+
+The tool reads both of these values under
+HKLM\SYSTEM\CurrentControlSet\Control\Session Manager:
+
+  PendingFileRenameOperations
+  PendingFileRenameOperations2
+
+Each operation must be a source/destination pair. An empty destination means a
+queued deletion; a nonempty destination means a rename or replacement. Both
+queues are checked, including when only PendingFileRenameOperations2 is present.
+
+Without -AllowPendingCleanup, queued file operations block a planned partition
+change at preflight, including preview. With it, every entry must match a limited
+recognized deletion pattern and have an exactly empty string destination.
+
+Accepted source paths after the native prefix:
+
+  EdgeCleanup
+    Either configured ProgramFiles root followed by \Microsoft\Edge\Temp;
+    a direct child named <digits>_<digits> or scoped_dir<digits>_<digits>;
+    or old_msedge.exe directly inside one of those children.
+    The configured roots are ProgramFiles and ProgramFiles(x86), when present.
+
+  PrintDriverCleanup
+    %SystemRoot%\System32\spool\V4Dirs\<guid> itself;
+    a direct file named <hex>.BUD or <hex>.gpd inside that GUID directory;
+    or the direct file pdc.xml inside that GUID directory.
+    The GUID has the standard 8-4-4-4-12 hyphenated form without braces.
+
+  InstallerRollbackCleanup
+    <drive>:\Config.Msi\<hex>.rbf on a local drive.
+
+<digits> means one or more decimal digits. <hex> means one or more hexadecimal
+digits. Matching is case-insensitive. The source must start with \??\ before its
+absolute local drive path. An observed *1 or *2 marker may precede that prefix;
+the tool treats these markers as opaque strings, not as operation codes.
+Other files or deeper descendants of these directories are not accepted.
+
+Path components containing dot traversal, forward slashes, alternate streams,
+wildcards, control characters, empty components, or trailing dots/spaces are
+rejected. Every registry value is parsed independently as an even-length,
+one-dimensional array of source/destination strings. A malformed value cannot
+be completed using entries from the other value. Null values or elements,
+nonstring elements, and empty or whitespace sources are rejected. Destinations
+must be exactly empty strings; whitespace or null does not qualify.
+
+The following remain blocking even with -AllowPendingCleanup:
+  - Component Based Servicing (CBS) or Windows Update restart flags.
+  - A rename/replacement with a nonempty destination.
+  - An unknown or unsupported deletion source.
+  - Malformed queue data, including invalid source/destination pairs.
+
+The checks run again after backup verification, before partition changes begin.
+A successful preview does not bypass these rechecks; a newly blocking entry
+stops the run before partition changes.
+Passing the classifier describes the queued paths; it does not prove that
+maintenance has finished or that a printer driver is healthy. The tool leaves
+the registry values and queued files intact and does not trigger their deletion.
+
+Accepted entries generate a warning containing their classification counts.
+An apply records the selected option as AllowPendingCleanupRequested in
+State.json. The transcript captures warnings emitted after logging starts.
+
+To select the exception, run this complete single-line preview command:
+
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "D:\Move-WinRE-ExtendC.ps1" -BackupDrive D -Placement Auto -AllowPendingCleanup
+
+After reviewing a successful preview, include the switch again when applying:
+
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "D:\Move-WinRE-ExtendC.ps1" -BackupDrive D -Placement Auto -AllowPendingCleanup -Apply
+
+The switch is not persisted. If a servicing flag or unsupported queue entry is
+reported, resolve that condition before retrying. This option cannot override it.
 
 SPACE REQUIREMENTS AND A 100-GiB MBR EXAMPLE
 
@@ -242,23 +338,23 @@ From the extracted bundle, run the non-destructive helper tests with:
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\qa\Run-Tests.ps1
 
 The runner parses the main file, checks known PowerShell 5.1 syntax/encoding
-constraints and runs eight suites in separate processes. It extracts helper
+constraints and runs nine suites in separate processes. It extracts helper
 definitions; it does not execute the main script's Windows disk workflow.
 
-Completed CI run:
-  https://github.com/PaulRobert1/WinRE-Relocator/actions/runs/44552477165
+Completed v3.0.2 CI run:
+  https://github.com/PaulRobert1/WinRE-Relocator/actions/runs/44702822339
 Code and tests commit:
-  d905dbe27d04b4a571d3f07c07adf91da60611f7
+  6b2fe0374e5f088581ad3bb4c12293a4622babf0
 
 Windows Server 2022:
   Windows PowerShell Desktop 5.1.20348.5773; CLR 4.0.30319.42000.
-  224 passed, 0 failed, 1 skipped, 0 compatibility failures.
+  318 passed, 0 failed, 1 skipped, 0 compatibility failures.
   The volume GUID suite passed 23 checks on real temporary files. Its only
   skip was a symbolic-link fixture whose creation was unavailable.
 
 Linux:
   PowerShell Core 7.6.10.
-  203 passed, 0 failed, 2 skipped, 0 compatibility failures.
+  297 passed, 0 failed, 2 skipped, 0 compatibility failures.
   Skips: the real EFS fixture and Windows-only volume GUID fixture.
 
 Both main-script parses completed without errors. Coverage includes:
@@ -268,7 +364,13 @@ Both main-script parses completed without errors. Coverage includes:
   - Actual temporary files, known hashes, corruption and reparse-point rejection.
   - Native exit/error handling and delayed DiskPart selection/failure gates.
   - Native metadata, enumeration, SHA-256 hashing, copying and directory creation
-    through actual Windows volume GUID paths in the new eighth suite.
+    through actual Windows volume GUID paths in the eighth suite.
+
+The ninth suite passed 94 checks on each platform for pending-maintenance
+classification, strict defaults, the opt-in cleanup exception, both queues and
+blocking conditions. It uses fixtures and mocked registry reads. No real
+registry-provider fixtures or registry writes were exercised. Its run results
+are recorded in VALIDATION.txt.
 
 The Windows results validate file access on that runner, not the complete
 partition/WinRE workflow or every Windows PowerShell 5.1 host. The reporting
@@ -295,6 +397,9 @@ another recovery partition later if a future image outgrows the current one.
 Use -Placement EndOfDisk to follow the normal adjacent-after-Windows layout.
 
 PRIMARY REFERENCES
+
+Pending deletion/rename queue format:
+https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw
 
 Volume GUID paths and host-dependent .NET path normalization:
 https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-volume

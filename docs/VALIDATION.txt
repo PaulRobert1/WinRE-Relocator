@@ -1,3 +1,94 @@
+WinRE Relocator 3.0.2 - validation record
+Date: 2026-11-20
+
+Current release verification
+-----------------------------
+Code/test commit: 6b2fe0374e5f088581ad3bb4c12293a4622babf0
+https://github.com/PaulRobert1/WinRE-Relocator/commit/6b2fe0374e5f088581ad3bb4c12293a4622babf0
+CI run:
+https://github.com/PaulRobert1/WinRE-Relocator/actions/runs/44702822339
+
+Windows job: 136175064075
+Runner: windows-2022; Windows PowerShell Desktop 5.1.20348.5773
+CLR: 4.0.30319.42000
+TOTAL: 318 passed; 0 failed; 1 skipped; 0 compatibility failures.
+
+Linux job: 136175064302
+Runner: ubuntu-24.04; PowerShell Core 7.6.10
+TOTAL: 297 passed; 0 failed; 2 skipped; 0 compatibility failures.
+
+Both jobs passed the full main-script parse and known PowerShell 5.1
+syntax/encoding guards. Nine suites ran in separate child processes.
+
+Suite                                      Windows P/F/S   Linux P/F/S
+Test-WinREHelpers.ps1                       44 / 0 / 0     44 / 0 / 0
+Test-ReportedMBRLayout.ps1                    3 / 0 / 0      3 / 0 / 0
+Test-WinREPlacement.ps1                     65 / 0 / 0     65 / 0 / 0
+Test-WinREStagingSpace.ps1                   11 / 0 / 0     11 / 0 / 0
+Test-WinRECapacityHelpers.ps1                19 / 0 / 0     19 / 0 / 0
+Test-WinREIdentityAndManifest.ps1            45 / 0 / 0     44 / 0 / 1
+Test-WinRENativeAndAttributes.ps1            14 / 0 / 0     14 / 0 / 0
+Test-WinREVolumeGuidPaths.ps1                23 / 0 / 1      3 / 0 / 1
+Test-WinREPendingMaintenance.ps1             94 / 0 / 0     94 / 0 / 0
+
+Windows skip: the volume-GUID suite could not create its symbolic-link fixture.
+Linux skips: real EFS unavailable and real Windows volume-GUID fixture unavailable.
+
+Pending-maintenance regression
+-------------------------------
+Before implementation, a test invoked the old guard with a recognized Edge
+deletion queue and -AllowPendingCleanup. It failed with the original blanket
+pending-file-operations refusal: 0 passed, 1 failed, exit 1.
+
+The new suite executes the real classifier and maintenance guard extracted
+from the script AST. Only the external registry reads are replaced by controlled
+test inputs. It exercises both actual main-workflow guard call expressions,
+with the real top-level parameter declarations, without running the disk workflow.
+
+Coverage includes:
+- Supported Edge, V4 printer, and Config.Msi deletion patterns.
+- Literal native source strings, observed opaque *1/*2 markers, case handling,
+  configured installation roots, and exact-empty destinations.
+- Preservation of the input arrays and independent pairing of both registry values.
+- Missing queues and empty one-dimensional arrays.
+- Refusal of unknown markers, null/scalar/nonstring/odd-length inputs, empty sources,
+  traversal, alternate streams, wildcard/control characters, ambiguous separators,
+  root-prefix collisions, unexpected leaves, and every nonempty destination.
+- Strict behavior when the option is omitted.
+- CBS/WU refusal regardless of the option, including precedence over queue inspection.
+- Registry read failure propagation.
+- A newly dangerous queue introduced between the two guard invocations.
+- Explicit propagation of the option at each main-workflow call site.
+
+Windows execution confirms these helper and binding behaviors on PowerShell 5.1.
+It does not reproduce real live registry-provider reads or establish what Windows
+will do with each pending entry at the next boot. In particular, *1/*2 are accepted
+as observed source prefixes; the tool neither executes nor asserts the meaning
+of those marker numbers.
+
+Classification is an explicit policy exception for recognized deletion-only
+paths. It is not evidence that the files are inactive, that all installation or
+printer maintenance has finished, or that a restart is generally unnecessary.
+No registry values or queued files are changed.
+
+Reproduce all nine suites
+--------------------------
+Windows:
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\qa\Run-Tests.ps1
+Linux:
+  pwsh -NoProfile -File ./qa/Run-Tests.ps1
+
+Production boundary
+--------------------
+No real partition creation/deletion/extension, REAgentC registration switch,
+BitLocker suspend/resume, or WinRE boot test was performed. All of those remain
+required on a disposable Windows clone with a recoverable system/VM backup
+before applying the tool to a critical server. The v3.0.2 patch does not change
+the original native REAgentC rollback registration path behavior.
+
+Historical v3.0.1 record follows unchanged
+==========================================
+
 WinRE Relocator 3.0.1 - validation record
 Date: 2026-11-19
 

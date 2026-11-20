@@ -1,5 +1,50 @@
 # Release notes
 
+## v3.0.2
+
+Adds an explicit, limited exception for recognized pending cleanup deletions.
+
+**[Download Move-WinRE-ExtendC.ps1](https://github.com/PaulRobert1/WinRE-Relocator/releases/download/v3.0.2/Move-WinRE-ExtendC.ps1)**
+
+### Pending cleanup option
+
+The new `-AllowPendingCleanup` switch checks both `PendingFileRenameOperations` and `PendingFileRenameOperations2`. It permits only recognized deletion patterns for Edge temporary files, printer-spool V4 directories, and Windows Installer rollback files. Every accepted entry must have an empty destination. The default behavior still blocks queued file operations.
+
+Pending CBS or Windows Update restart flags, renames/replacements with nonempty destinations, unknown paths, and malformed queues always block the operation. Each queue is parsed independently; null and whitespace destinations do not qualify as an empty deletion destination. The tool repeats the maintenance checks after backup verification, before partition changes begin. It preserves the registry queue and queued files; it does not perform or cancel their pending cleanup.
+
+Accepted entries generate a warning with category counts. Apply journals record the selected option as `AllowPendingCleanupRequested` in `State.json`. Recognized source markers `*1` and `*2` are treated as opaque prefixes, not interpreted as operation codes. The precise path shapes are listed in the [operations guide](docs/OPERATIONS.txt).
+
+These classifications identify queue content. They do not certify completed maintenance, printer-driver health, or overall readiness for disk changes.
+
+### Usage
+
+Pass the switch on both invocations when selecting this exception. Preview:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Move-WinRE-ExtendC.ps1" -BackupDrive D -Placement Auto -AllowPendingCleanup
+```
+
+Apply after reviewing a successful preview:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Move-WinRE-ExtendC.ps1" -BackupDrive D -Placement Auto -AllowPendingCleanup -Apply
+```
+
+Both examples are complete single-line commands. The option is not persisted between runs. See the [operations guide](docs/OPERATIONS.txt) for the recognized path patterns and refusal conditions.
+
+### Validation
+
+The **nine suites** completed in [CI run 44702822339](https://github.com/PaulRobert1/WinRE-Relocator/actions/runs/44702822339), for code and tests at commit `6b2fe0374e5f088581ad3bb4c12293a4622babf0`:
+
+| Host | Passed | Failed | Skipped | Compatibility failures |
+|---|---:|---:|---:|---:|
+| Windows Server 2022, Windows PowerShell Desktop 5.1.20348.5773, CLR 4.0.30319.42000 | 318 | 0 | 1 | 0 |
+| Linux, PowerShell Core 7.6.10 | 297 | 0 | 2 | 0 |
+
+Both main-script parses passed. The new pending-maintenance suite passed **94 checks on each platform** using fixtures and mocked registry reads. It does not exercise real registry-provider fixtures or write registry values. The Windows volume GUID suite still passed 23 checks, with a symbolic-link fixture unavailable. Linux skipped the real EFS and Windows-only volume GUID fixtures.
+
+The [validation record](docs/VALIDATION.txt) records the executed checks. Real partition changes, WinRE registration, BitLocker operations, REAgentC rollback registration, Windows startup after relocation, and recovery boot remain outside the integration-tested scope. Validate on a disposable Windows clone before production use.
+
 ## v3.0.1
 
 Compatibility hotfix for recovery-file access through volume GUID paths on Windows PowerShell 5.1.

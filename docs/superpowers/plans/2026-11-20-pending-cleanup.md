@@ -29,19 +29,21 @@
 
 Files: Move-WinRE-ExtendC.ps1; qa/Test-WinREPendingMaintenance.ps1; qa/Run-Tests.ps1.
 
-- [ ] Write and observe a failing opt-in cleanup gate test against v3.0.1.
-- [ ] Implement Get-PendingFileOperationAssessment with the documented return contract.
-- [ ] Add AllowPendingCleanup to the public parameters and both gate calls.
-- [ ] Test accepted categories, mixed queues, malformed values, unknown prefixes,
+- [x] Write and observe a failing opt-in cleanup gate test against v3.0.1.
+- [x] Implement Get-PendingFileOperationAssessment with the documented return contract.
+- [x] Add AllowPendingCleanup to the public parameters and both gate calls.
+- [x] Test accepted categories, mixed queues, malformed values, unknown prefixes,
       unsafe paths, replacements, default refusal, hard servicing blockers and rechecks.
-- [ ] Run the complete existing suite plus the new suite locally and on Windows PowerShell 5.1.
-- [ ] Review the implementation independently.
+- [x] Run the complete existing suite plus the new suite locally and on Windows PowerShell 5.1.
+- [x] Review the implementation independently.
 
 ## Task 2: Documentation and delivery
 
 Files: README.md; RELEASE_NOTES.md; docs/OPERATIONS.txt; docs/VALIDATION.txt.
 
-- [ ] Document explicit preview/apply commands, path boundaries and remaining validation limits.
+- [x] Document explicit preview/apply commands, path boundaries and remaining validation limits.
 - [ ] Record actual CI results, publish the tested commit and tag v3.0.2.
 - [ ] Attach standalone script, full ZIP and SHA256SUMS.txt to the release.
 - [ ] Verify GitHub asset digests and provide the corrected download link.
+
+Checklist reflects the verification snapshot before packaging. The GitHub release page records publication and attached-asset verification.

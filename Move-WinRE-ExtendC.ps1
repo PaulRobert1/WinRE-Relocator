@@ -23,8 +23,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Move-WinRE-ExtendC.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Move-WinRE-ExtendC.ps1 -Placement Auto -BackupDrive D -Apply
 .EXAMPLE
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Move-WinRE-ExtendC.ps1 -Placement BeforeC -BackupDrive E
+.PARAMETER AllowPendingCleanup
+Explicitly permit only recognized deletion-only entries under Edge Temp, printer
+V4Dirs, and Config.Msi. Preserve the pending queue and files. Servicing restarts,
+file replacements, malformed entries, and other paths still block execution.
 .NOTES
-Version 3.0.1. See the included validation record; Windows disk/WinRE/BitLocker
+Version 3.0.2. See the included validation record; Windows disk/WinRE/BitLocker
 integration and boot testing are still required on a disposable clone before production.
 Preview is read-only. -Apply authorizes the selected plan without interactive prompts.
 This is a scoped tool, not a promise that every possible Windows disk layout is supported.
@@ -42,6 +46,7 @@ param(
     [int]$MinimumRecoverySizeMB = 1024,
     [ValidatePattern('^[A-Za-z]$')]
     [string]$BackupDrive = 'D',
+    [switch]$AllowPendingCleanup,
     [switch]$PassThru
 )
 
@@ -726,16 +731,107 @@ function Get-VolumeEncryptionState {
         Volume = $volume; ConversionStatus = $conversion; ProtectionStatus = $protection }
 }
 
+function Get-PendingFileOperationAssessment {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$SessionManager,
+        [Parameter(Mandatory)][string]$WindowsDirectory,
+        [AllowEmptyCollection()][string[]]$ProgramFilesDirectories = @()
+    )
+    # This is a narrow path policy, not evidence that an installer has finished.
+    # Preserve the native strings and empty destinations; never edit either queue.
+    $operations = New-Object 'System.Collections.Generic.List[object]'
+    $guidPattern = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+    $printPattern = '\A' + [regex]::Escape($WindowsDirectory.TrimEnd('\')) +
+        '\\System32\\spool\\V4Dirs\\' + $guidPattern + '(?:\\(?:[0-9a-f]+\.(?:bud|gpd)|pdc\.xml))?\z'
+    $edgePatterns = @()
+    foreach ($directory in $ProgramFilesDirectories) {
+        if (-not [string]::IsNullOrWhiteSpace($directory)) {
+            $edgePatterns += '\A' + [regex]::Escape($directory.TrimEnd('\')) +
+                '\\Microsoft\\Edge\\Temp(?:\\(?:scoped_dir)?[0-9]+_[0-9]+(?:\\old_msedge\.exe)?)?\z'
+        }
+    }
+    foreach ($valueName in @('PendingFileRenameOperations', 'PendingFileRenameOperations2')) {
+        $property = $SessionManager.PSObject.Properties[$valueName]
+        if ($null -eq $property) { continue }
+        $raw = $property.Value
+        if ($raw -isnot [Array] -or $raw.Rank -ne 1 -or ($raw.Count % 2) -ne 0) {
+            $operations.Add([pscustomobject]@{
+                ValueName = $valueName; PairIndex = -1; Source = $null; Destination = $null
+                Category = 'Unrecognized'; AllowedCleanup = $false
+                Reason = 'Expected an even-length array of source/destination strings.'
+            })
+            continue
+        }
+        for ($i = 0; $i -lt $raw.Count; $i += 2) {
+            $source = $raw[$i]; $destination = $raw[$i + 1]
+            $category = 'Unrecognized'; $reason = ''
+            if ($source -isnot [string] -or $destination -isnot [string]) {
+                $reason = 'Source and destination must both be strings; null is not an empty destination.'
+            } elseif ([string]::IsNullOrWhiteSpace($source)) {
+                $reason = 'The source is empty or whitespace.'
+            } elseif ($destination.Length -ne 0) {
+                $reason = 'A nonempty destination denotes a rename/replacement, not an allowed deletion.'
+            } else {
+                # *1 and *2 are observed opaque markers, not interpreted opcodes.
+                $match = [regex]::Match($source, '\A(?:\*[12])?\\\?\?\\(?<Path>[A-Za-z]:\\.+)\z')
+                if (-not $match.Success) {
+                    $reason = 'Unrecognized source prefix or nonlocal path.'
+                } else {
+                    $path = $match.Groups['Path'].Value
+                    $tail = $path.Substring(3)
+                    $components = @($tail -split '\\')
+                    if ($tail -match '[\x00-\x1f\x7f<>:"/|?*]' -or
+                        @($components | Where-Object { $_.Length -eq 0 -or $_ -in @('.', '..') -or $_ -match '[ .]\z' }).Count -gt 0) {
+                        $reason = 'Unsafe or ambiguous path components.'
+                    } elseif ($path -imatch $printPattern) {
+                        $category = 'PrintDriverCleanup'
+                    } elseif ($path -imatch '\A[A-Za-z]:\\Config\.Msi\\[0-9a-f]+\.rbf\z') {
+                        $category = 'InstallerRollbackCleanup'
+                    } else {
+                        foreach ($pattern in $edgePatterns) {
+                            if ($path -imatch $pattern) { $category = 'EdgeCleanup'; break }
+                        }
+                        if ($category -eq 'Unrecognized') { $reason = 'Path is outside the restricted cleanup patterns.' }
+                    }
+                }
+            }
+            $operations.Add([pscustomobject]@{
+                ValueName = $valueName; PairIndex = [int]($i / 2); Source = $source; Destination = $destination
+                Category = $category; AllowedCleanup = ($category -ne 'Unrecognized'); Reason = $reason
+            })
+        }
+    }
+    $allowed = @($operations | Where-Object AllowedCleanup).Count
+    [pscustomobject]@{
+        OperationCount = $operations.Count; AllowedCleanupCount = $allowed
+        BlockedCount = $operations.Count - $allowed
+        CanAllowCleanup = ($operations.Count -gt 0 -and $allowed -eq $operations.Count)
+        Operations = @($operations.ToArray())
+    }
+}
+
 function Assert-NoPendingMaintenance {
+    [CmdletBinding()]
+    param([switch]$AllowPendingCleanup)
     foreach ($key in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending',
         'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired')) {
-        if (Test-Path -LiteralPath $key) { throw 'Windows reports a pending servicing restart. This tool will not reboot or continue through it.' }
+        if (Test-Path -LiteralPath $key -ErrorAction Stop) { throw 'Windows reports a pending servicing restart. This tool will not reboot or continue through it.' }
     }
     $sessionKey = Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -ErrorAction Stop
-    if ($sessionKey.PSObject.Properties['PendingFileRenameOperations'] -and
-        @($sessionKey.PendingFileRenameOperations | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }).Count -gt 0) {
-        throw 'Windows has pending file replacement operations. Finish that maintenance before running this tool.'
+    $programDirectories = @($env:ProgramFiles, ${env:ProgramFiles(x86)})
+    $assessment = Get-PendingFileOperationAssessment -SessionManager $sessionKey -WindowsDirectory $env:SystemRoot -ProgramFilesDirectories $programDirectories
+    if ($assessment.OperationCount -eq 0) { return }
+    if ($assessment.BlockedCount -gt 0) {
+        $first = @($assessment.Operations | Where-Object { -not $_.AllowedCleanup })[0]
+        throw ('Pending file operations include {0} entry/entries outside the cleanup exception. {1}, pair {2}: {3} Source: {4} Destination: {5}' -f
+            $assessment.BlockedCount, $first.ValueName, $first.PairIndex, $first.Reason, $first.Source, $first.Destination)
     }
+    if (-not $AllowPendingCleanup) {
+        throw ('Windows has {0} pending file deletion(s) matching restricted cleanup patterns. Review the queue and rerun with -AllowPendingCleanup to explicitly permit these entries without changing the queue.' -f $assessment.OperationCount)
+    }
+    $categories = @($assessment.Operations | Group-Object Category | ForEach-Object { '{0}={1}' -f $_.Name, $_.Count }) -join ', '
+    Write-Warning ('AllowPendingCleanup accepted {0} recognized deletion-only entries ({1}). The registry queue and queued files are preserved. This does not certify that all maintenance has finished.' -f $assessment.OperationCount, $categories)
 }
 
 function Assert-BackupVolume {
@@ -858,7 +954,8 @@ $disableAttempted = $false; $newWinREVerified = $false; $creationAttempted = $fa
 $deletionAttempted = $false; $resizeAttempted = $false; $failure = $null; $finished = $false
 $mutex = $null; $mutexOwned = $false; $bitLockerVolume = $null; $finalC = $null
 $script:state = [ordered]@{
-    ToolVersion = '3.0.1'; ComputerName = $env:COMPUTERNAME; StartedUtc = [DateTime]::UtcNow.ToString('o')
+    ToolVersion = '3.0.2'; ComputerName = $env:COMPUTERNAME; StartedUtc = [DateTime]::UtcNow.ToString('o')
+    AllowPendingCleanupRequested = [bool]$AllowPendingCleanup
     UpdatedUtc = ''; Stage = 'preflight'; Result = 'InProgress'; RequestedPlacement = $Placement
     Plan = $null; OriginalC = $null; OriginalRecovery = $null; NewRecovery = $null
     CreationAttempted = $false; NewWinREVerified = $false; OldDeletionAttempted = $false; OldDeleted = $false
@@ -913,7 +1010,7 @@ try {
     $plan = Get-LayoutPlan $script:disk $c $script:originalParts $location $recoveryBytes -Placement $Placement
     $script:state.Plan = $plan | Select-Object Action, SelectedPlacement, RecoveryOffset, RecoverySize, CGrowthLimit, ExpectedCSize, GainBytes, PlacementReason
     $script:state.OriginalC = $script:cIdentity; $script:state.OriginalRecovery = $script:oldIdentity
-    Write-Host "`nWinRE Relocator 3.0.1 - $(if ($Apply) {'APPLY'} else {'PREVIEW'})" -ForegroundColor Cyan
+    Write-Host "`nWinRE Relocator 3.0.2 - $(if ($Apply) {'APPLY'} else {'PREVIEW'})" -ForegroundColor Cyan
     Write-Host "Disk $($script:disk.Number) ($($script:disk.PartitionStyle)); requested placement: $Placement"
     $script:originalParts | Format-Table PartitionNumber, DriveLetter, Type,
         @{N='MiB';E={[Math]::Round($_.Size / 1MB, 1)}}, Offset -AutoSize | Out-Host
@@ -942,7 +1039,7 @@ try {
         if ($script:backupVolume.SizeRemaining -lt $requiredBackup) { throw 'The backup volume lacks the required recovery-backup working space.' }
         $spacePlan = [pscustomobject]@{ RequiredCBytes = [long]0; RequiredBackupBytes = $requiredBackup }
     }
-    Assert-NoPendingMaintenance
+    Assert-NoPendingMaintenance -AllowPendingCleanup:$AllowPendingCleanup
     $osEncryption = Get-VolumeEncryptionState ([string]$cVolume.Path) -RequireReported
     $oldEncryption = Get-VolumeEncryptionState $oldRoot
     if ($oldEncryption.Reported -and $oldEncryption.ConversionStatus -ne 0) { throw 'The registered recovery volume must be fully decrypted.' }
@@ -1003,7 +1100,7 @@ try {
         "/LogPath:$(Join-Path $script:workDir 'DISM-WimInfo.log')", "/ScratchDir:$scratch"))
 
     Set-OperationStage 'Revalidate before partition changes'
-    Assert-NoPendingMaintenance
+    Assert-NoPendingMaintenance -AllowPendingCleanup:$AllowPendingCleanup
     Assert-CurrentLayout
     Write-Host (Assert-WinREOnIdentity $script:oldIdentity)
     $freshC = Get-CurrentPartition $script:cIdentity

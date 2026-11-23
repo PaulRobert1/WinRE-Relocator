@@ -30,7 +30,7 @@ Explicitly permit only recognized deletion-only entries under Edge Temp, printer
 V4Dirs, and Config.Msi. Preserve the pending queue and files. Servicing restarts,
 file replacements, malformed entries, and other paths still block execution.
 .NOTES
-Version 3.0.3. See the included validation record; Windows disk/WinRE/BitLocker
+Version 3.0.4. See the included validation record; Windows disk/WinRE/BitLocker
 integration and boot testing are still required on a disposable clone before production.
 Preview is read-only. -Apply authorizes the selected plan without interactive prompts.
 This is a scoped tool, not a promise that every possible Windows disk layout is supported.
@@ -675,6 +675,40 @@ function Get-CurrentPartition {
     $matches[0]
 }
 
+function New-MbrPrimaryCreateCommands {
+    param([int]$DiskNumber, [uint64]$Offset, [uint64]$Size)
+    if ($DiskNumber -lt 0 -or $Offset -lt 1MB -or $Offset % 1KB -ne 0 -or
+        $Size -lt 1GB -or $Size % 1MB -ne 0) {
+        throw 'MBR primary creation requires a valid disk and aligned offset/size.'
+    }
+    $offsetKB = [uint64]($Offset / 1KB)
+    $sizeMB = [uint64]($Size / 1MB)
+    @(
+        ('select disk {0}' -f $DiskNumber),
+        ('create partition primary size={0} offset={1} id=07' -f $sizeMB, $offsetKB)
+    )
+}
+
+function Assert-MbrPrimaryCreation {
+    param([object[]]$Before, [object[]]$After, [uint64]$Offset, [uint64]$Size, [int]$DiskNumber)
+    if ($Before.Count -ne 3 -or $After.Count -ne 4) {
+        throw ('MBR primary creation changed partition topology unexpectedly (before={0}, after={1}; expected 3 and 4).' -f $Before.Count, $After.Count)
+    }
+    if (@($After | Where-Object { [int]$_.MbrType -in @(5,15,133,66) -or $_.PartitionNumber -eq 0 }).Count -gt 0) {
+        throw 'Extended/logical MBR topology appeared after creation. No formatting is permitted.'
+    }
+    foreach ($p in $Before) {
+        $matches = @($After | Where-Object { $_.Offset -eq $p.Offset -and $_.Size -eq $p.Size -and
+            [int]$_.MbrType -eq [int]$p.MbrType -and $_.DiskNumber -eq $p.DiskNumber })
+        if ($matches.Count -ne 1) { throw 'An original MBR partition changed during creation.' }
+    }
+    $candidate = @($After | Where-Object { $_.DiskNumber -eq $DiskNumber -and $_.Offset -eq $Offset -and
+        $_.Size -eq $Size -and [int]$_.MbrType -eq 7 -and $_.PartitionNumber -gt 0 -and
+        -not $_.IsBoot -and -not $_.IsSystem -and -not $_.IsActive })
+    if ($candidate.Count -ne 1) { throw 'New MBR recovery candidate is not one exact basic primary partition.' }
+    $candidate[0]
+}
+
 function Assert-CurrentLayout {
     param([switch]$AllowCGrowth)
     $current = @(Get-Partition -DiskNumber $script:disk.Number -ErrorAction Stop)
@@ -982,7 +1016,7 @@ $disableAttempted = $false; $newWinREVerified = $false; $creationAttempted = $fa
 $deletionAttempted = $false; $resizeAttempted = $false; $failure = $null; $finished = $false
 $mutex = $null; $mutexOwned = $false; $bitLockerVolume = $null; $finalC = $null
 $script:state = [ordered]@{
-    ToolVersion = '3.0.3'; ComputerName = $env:COMPUTERNAME; StartedUtc = [DateTime]::UtcNow.ToString('o')
+    ToolVersion = '3.0.4'; ComputerName = $env:COMPUTERNAME; StartedUtc = [DateTime]::UtcNow.ToString('o')
     AllowPendingCleanupRequested = [bool]$AllowPendingCleanup; AllowUninstalledBitLockerRequested = [bool]$AllowUninstalledBitLocker
     UpdatedUtc = ''; Stage = 'preflight'; Result = 'InProgress'; RequestedPlacement = $Placement
     Plan = $null; OriginalC = $null; OriginalRecovery = $null; NewRecovery = $null
@@ -1038,7 +1072,7 @@ try {
     $plan = Get-LayoutPlan $script:disk $c $script:originalParts $location $recoveryBytes -Placement $Placement
     $script:state.Plan = $plan | Select-Object Action, SelectedPlacement, RecoveryOffset, RecoverySize, CGrowthLimit, ExpectedCSize, GainBytes, PlacementReason
     $script:state.OriginalC = $script:cIdentity; $script:state.OriginalRecovery = $script:oldIdentity
-    Write-Host "`nWinRE Relocator 3.0.3 - $(if ($Apply) {'APPLY'} else {'PREVIEW'})" -ForegroundColor Cyan
+    Write-Host "`nWinRE Relocator 3.0.4 - $(if ($Apply) {'APPLY'} else {'PREVIEW'})" -ForegroundColor Cyan
     Write-Host "Disk $($script:disk.Number) ($($script:disk.PartitionStyle)); requested placement: $Placement"
     $script:originalParts | Format-Table PartitionNumber, DriveLetter, Type,
         @{N='MiB';E={[Math]::Round($_.Size / 1MB, 1)}}, Offset -AutoSize | Out-Host
@@ -1157,12 +1191,33 @@ try {
     if ($plan.Action -eq 'RelocateAndExtend') {
         Set-OperationStage 'Create replacement while original recovery remains intact'
         $script:temporaryLetter = Get-FreeTemporaryLetter
-        $newParameters = @{ DiskNumber = $script:disk.Number; Offset = $plan.RecoveryOffset; Size = $plan.RecoverySize; DriveLetter = $script:temporaryLetter }
-        if ([string]$script:disk.PartitionStyle -eq 'GPT') { $newParameters.GptType = '{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}' }
-        else { $newParameters.MbrType = 'IFS' }
         $creationAttempted = $true; $script:state.CreationAttempted = $true
         Write-OperationState
-        $created = @(New-Partition @newParameters -ErrorAction Stop)
+        if ([string]$script:disk.PartitionStyle -eq 'MBR') {
+            # New-Partition -MbrType IFS may create an extended container plus a
+            # logical drive on some MBR hosts. Explicit primary creation is required.
+            $beforeCreation = @(Get-Partition -DiskNumber $script:disk.Number -ErrorAction Stop)
+            if ($beforeCreation.Count -ne $script:originalIdentities.Count -or
+                @($beforeCreation | Where-Object { [int]$_.MbrType -in @(5, 15, 133, 66) }).Count -gt 0) {
+                throw 'MBR layout is not the expected primary-only layout. Do not resume after a partial run.'
+            }
+            $commands = New-MbrPrimaryCreateCommands -DiskNumber $script:disk.Number -Offset $plan.RecoveryOffset -Size $plan.RecoverySize
+            Invoke-DiskPartChecked -Commands $commands | Out-Null
+            Update-HostStorageCache
+            $afterCreation = @(Get-Partition -DiskNumber $script:disk.Number -ErrorAction Stop)
+            $created = @(Assert-MbrPrimaryCreation -Before $beforeCreation -After $afterCreation -Offset $plan.RecoveryOffset -Size $plan.RecoverySize -DiskNumber $script:disk.Number)
+            # Assign the temporary letter only after the partition is proven primary.
+            $temporaryAccess = '{0}:' -f $script:temporaryLetter
+            Add-PartitionAccessPath -DiskNumber $script:disk.Number -PartitionNumber $created[0].PartitionNumber -AccessPath $temporaryAccess -ErrorAction Stop
+            $created = @(Get-Partition -DiskNumber $script:disk.Number -ErrorAction Stop | Where-Object { $_.Offset -eq $plan.RecoveryOffset })
+            if ($created.Count -ne 1 -or [string]$created[0].DriveLetter -ine [string]$script:temporaryLetter) {
+                throw 'Temporary letter assignment could not be verified.'
+            }
+        } else {
+            $newParameters = @{ DiskNumber = $script:disk.Number; Offset = $plan.RecoveryOffset; Size = $plan.RecoverySize; DriveLetter = $script:temporaryLetter
+                GptType = '{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}' }
+            $created = @(New-Partition @newParameters -ErrorAction Stop)
+        }
         if ($created.Count -ne 1 -or $created[0].DiskNumber -ne $script:disk.Number -or
             $created[0].Offset -ne $plan.RecoveryOffset -or $created[0].Size -ne $plan.RecoverySize) {
             throw 'The newly created partition does not match the planned extent. It will not be formatted.'

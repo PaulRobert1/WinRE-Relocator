@@ -1,5 +1,13 @@
 # Release notes
 
+## v3.0.3 (source hotfix)
+
+Explicit `-AllowUninstalledBitLocker` option for the exact Windows Server configuration in which BitLocker is not installed and the MicrosoftVolumeEncryption CIM provider and manage-bde.exe are absent. The default refuses unknown encryption states. The new option does not independently prove decryption and must not be treated as a safe override on encrypted volumes.
+
+The code now detects the missing-provider state explicitly rather than returning an assumed decrypted status on any CIM error. The helper regression checks cover installed, unavailable, unrecognized, and failed-provider conditions on Windows PowerShell and Linux.
+
+**The complete partition-change workflow is not yet integration-tested; do not treat a passing preview as production certification.**
+
 ## v3.0.2
 
 Adds an explicit, limited exception for recognized pending cleanup deletions.

@@ -10,6 +10,20 @@ WinRE Relocator is a standalone PowerShell script that creates and verifies a re
 
 > **Validation status:** The nine helper suites passed **318 checks on Windows PowerShell 5.1** and **297 checks on Linux PowerShell 7**, with zero failures. One Windows fixture and two Linux fixtures were skipped; see the results below. Pending-maintenance checks use mocked registry reads. Real partition changes, WinRE registration, BitLocker operations, REAgentC rollback registration, and recovery boot have **not** been integration tested. Validate the tool on a disposable Windows clone before production use.
 
+## v3.0.3 candidate: optional BitLocker-provider exception
+
+Windows Server systems reporting `Get-WindowsFeature BitLocker` as `Available` (not installed) may lack the `root\\CIMV2\\Security\\MicrosoftVolumeEncryption` namespace and `manage-bde.exe`. In earlier versions a missing CIM provider could cause an unhelpful preflight exception or be interpreted as unencrypted. Both situations are unsafe.
+
+The updated source fails closed by default. For an administrator who has **independently established that the Windows and recovery volumes are not BitLocker-encrypted**, `-AllowUninstalledBitLocker` permits this exact configuration: the BitLocker feature must be `Available`, the manage-bde executable must be absent, and the WMI provider must be unavailable. The option does **not** prove that disk encryption is absent. If the feature is installed, the provider exists, the state is unrecognized, or the WMI query fails for a different reason, the tool continues to refuse the operation. No BitLocker installation or encryption setting changes are made.
+
+Preview on a server with the previously reported pending Edge/printer/installer cleanup queue:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\\Move-WinRE-ExtendC.ps1" -BackupDrive D -AllowPendingCleanup -AllowUninstalledBitLocker
+```
+
+Do **not** add `-Apply` to a critical server until the full disk relocation and WinRE registration workflow has been tested on a disposable clone. CI helper tests are not a production disk-integration test.
+
 ## New in v3.0.2: optional pending-cleanup exception
 
 `-AllowPendingCleanup` permits a narrow set of recognized pending file deletions after both Windows file-operation queues are inspected. The default remains strict: queued operations block preview and apply for a plan that would change partitions. The option preserves the registry entries and queued files, and it does not permit pending Windows servicing, replacements, or unrecognized operations. See [Pending maintenance and cleanup queues](#pending-maintenance-and-cleanup-queues) for the accepted scope and commands.
@@ -72,6 +86,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Move-WinRE-ExtendC.ps
 | `-Placement` | `Auto` | Select `Auto`, `BeforeC`, or `EndOfDisk`. See the placement rules below. |
 | `-BackupDrive` | `D` | Letter of a separate, accessible, healthy, fixed NTFS data volume. Supply the letter without a colon. C: and the recovery volume are rejected as backup destinations. |
 | `-MinimumRecoverySizeMB` | `1024` | Minimum new recovery size in **MiB**, from `1024` through `8192`. The actual allocation grows if the payload requires more space. |
+| `-AllowUninstalledBitLocker` | Absent | Explicit exception for an uninstalled BitLocker feature with the provider and executable absent. Does not independently prove volumes are unencrypted. |
 | `-AllowPendingCleanup` | Absent | Permit only recognized pending deletion patterns when Windows servicing flags are clear. Supply it separately for preview and apply. See the cleanup-queue rules below. |
 | `-PassThru` | Absent | Return a structured result object in addition to normal host progress for preview, completion, or `NoChange`. |
 

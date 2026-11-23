@@ -6,6 +6,7 @@ if($errors.Count){throw ($errors|Out-String)}
 $defs=@($ast.FindAll({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-VolumeEncryptionState'},$true))
 if($defs.Count -ne 1){throw 'Missing unique encryption helper'}
 . ([scriptblock]::Create($defs[0].Extent.Text))
+$env:SystemRoot='C:\Windows'
 $script:featureState='Available'
 $script:providerMode='missing'
 $script:AllowUninstalledBitLocker=$false

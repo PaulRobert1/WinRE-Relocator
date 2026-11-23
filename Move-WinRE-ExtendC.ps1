@@ -729,7 +729,8 @@ function Get-VolumeEncryptionState {
             $hr = [long]$_.Exception.HResult
             $code = $hr -band 4294967295
             if ($code -notin @(0x8004100e, 0x80041010) -and
-                [string]$_.Exception.StatusCode -notin @('InvalidNamespace', 'InvalidClass')) { throw }
+                [string]$_.Exception.StatusCode -notin @('InvalidNamespace', 'InvalidClass') -and
+                [string]$_.Exception.Message -notmatch '(?i)invalid namespace|invalid class') { throw }
         }
         if ($namespacePresent) { throw 'BitLocker WMI provider exists despite uninstalled feature; refuse to infer encryption status.' }
         Write-Warning 'BitLocker feature is not installed, its WMI provider is missing, and -AllowUninstalledBitLocker was explicitly supplied. No BitLocker protection calls will be made. Disk encryption has not been independently proven absent.'

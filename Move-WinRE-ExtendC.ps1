@@ -23,12 +23,14 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Move-WinRE-ExtendC.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Move-WinRE-ExtendC.ps1 -Placement Auto -BackupDrive D -Apply
 .EXAMPLE
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Move-WinRE-ExtendC.ps1 -Placement BeforeC -BackupDrive E
+.PARAMETER AllowUninstalledBitLocker
+Explicit opt-in when the BitLocker feature is not installed and no provider or manage-bde executable exists. Encryption absence is not independently proven.
 .PARAMETER AllowPendingCleanup
 Explicitly permit only recognized deletion-only entries under Edge Temp, printer
 V4Dirs, and Config.Msi. Preserve the pending queue and files. Servicing restarts,
 file replacements, malformed entries, and other paths still block execution.
 .NOTES
-Version 3.0.2. See the included validation record; Windows disk/WinRE/BitLocker
+Version 3.0.3. See the included validation record; Windows disk/WinRE/BitLocker
 integration and boot testing are still required on a disposable clone before production.
 Preview is read-only. -Apply authorizes the selected plan without interactive prompts.
 This is a scoped tool, not a promise that every possible Windows disk layout is supported.
@@ -47,6 +49,7 @@ param(
     [ValidatePattern('^[A-Za-z]$')]
     [string]$BackupDrive = 'D',
     [switch]$AllowPendingCleanup,
+    [switch]$AllowUninstalledBitLocker,
     [switch]$PassThru
 )
 
@@ -706,16 +709,40 @@ function Assert-WinREOnIdentity {
 
 function Get-VolumeEncryptionState {
     param([string]$VolumePath, [switch]$RequireReported)
-    $available = $true
-    try {
-        $all = @(Get-CimInstance -Namespace 'root/CIMV2/Security/MicrosoftVolumeEncryption' `
-            -ClassName Win32_EncryptableVolume -ErrorAction Stop)
-    } catch [Microsoft.Management.Infrastructure.CimException] {
-        if ([string]$_.Exception.StatusCode -notin @('InvalidNamespace', 'InvalidClass')) { throw }
-        $available = $false; $all = @()
+    # Fail closed on systems where BitLocker state cannot be established.
+    # A missing provider is not equivalent to an unencrypted volume.
+    $features = @(Get-WindowsFeature -Name BitLocker -ErrorAction Stop)
+    if ($features.Count -ne 1) { throw 'Cannot determine the installed state of the BitLocker Windows feature.' }
+    $featureState = [string]$features[0].InstallState
+    if ($featureState -eq 'Available') {
+        if (-not $AllowUninstalledBitLocker) {
+            throw 'BitLocker is not installed and its WMI provider is unavailable. To explicitly allow this uninstalled-feature configuration use -AllowUninstalledBitLocker. This is not a proof of disk decryption.'
+        }
+        if (Test-Path -LiteralPath (Join-Path $env:SystemRoot 'System32\manage-bde.exe')) {
+            throw 'BitLocker executable is present despite the feature being reported uninstalled; encryption state is ambiguous.'
+        }
+        $namespacePresent = $false
+        try {
+            $namespacePresent = (@(Get-CimInstance -Namespace 'root/CIMV2/Security/MicrosoftVolumeEncryption' -ClassName Win32_EncryptableVolume -ErrorAction Stop).Count -ge 0)
+        } catch [Microsoft.Management.Infrastructure.CimException] {
+            # Namespace/class not found is expected only with an uninstalled feature.
+            $hr = [long]$_.Exception.HResult
+            $code = $hr -band 4294967295
+            if ($code -notin @(0x8004100e, 0x80041010) -and
+                [string]$_.Exception.StatusCode -notin @('InvalidNamespace', 'InvalidClass')) { throw }
+        }
+        if ($namespacePresent) { throw 'BitLocker WMI provider exists despite uninstalled feature; refuse to infer encryption status.' }
+        Write-Warning 'BitLocker feature is not installed, its WMI provider is missing, and -AllowUninstalledBitLocker was explicitly supplied. No BitLocker protection calls will be made. Disk encryption has not been independently proven absent.'
+        return [pscustomobject]@{
+            ProviderAvailable = $false; Reported = $false; Volume = $null
+            ConversionStatus = 0; ProtectionStatus = 0; AssumedUnencrypted = $true
+        }
     }
+    if ($featureState -ne 'Installed') { throw "Unsupported BitLocker feature state: $featureState. Encryption checks cannot be skipped." }
+    $all = @(Get-CimInstance -Namespace 'root/CIMV2/Security/MicrosoftVolumeEncryption' `
+        -ClassName Win32_EncryptableVolume -ErrorAction Stop)
     $matches = @($all | Where-Object { ([string]$_.DeviceID).TrimEnd('\') -ieq $VolumePath.TrimEnd('\') })
-    if ($matches.Count -gt 1 -or ($available -and $RequireReported -and $matches.Count -ne 1)) {
+    if ($matches.Count -gt 1 -or ($RequireReported -and $matches.Count -ne 1)) {
         throw 'Cannot establish a unique BitLocker state for the target volume.'
     }
     $conversion = 0; $protection = 0; $volume = $null
@@ -724,11 +751,11 @@ function Get-VolumeEncryptionState {
         $conversion = [int](Invoke-BitLockerMethod $volume 'GetConversionStatus' @{PrecisionFactor = [uint32]0}).ConversionStatus
         $protection = [int](Invoke-BitLockerMethod $volume 'GetProtectionStatus').ProtectionStatus
         if ($conversion -notin @(0, 1) -or $protection -notin @(0, 1)) {
-            throw 'BitLocker conversion is in progress/paused or its state is unknown. No online relocation will be attempted.'
+            throw 'BitLocker conversion is in progress/paused or its state is unknown.'
         }
     }
-    [pscustomobject]@{ ProviderAvailable = $available; Reported = ($matches.Count -eq 1)
-        Volume = $volume; ConversionStatus = $conversion; ProtectionStatus = $protection }
+    [pscustomobject]@{ ProviderAvailable = $true; Reported = ($matches.Count -eq 1)
+        Volume = $volume; ConversionStatus = $conversion; ProtectionStatus = $protection; AssumedUnencrypted = $false }
 }
 
 function Get-PendingFileOperationAssessment {
@@ -954,8 +981,8 @@ $disableAttempted = $false; $newWinREVerified = $false; $creationAttempted = $fa
 $deletionAttempted = $false; $resizeAttempted = $false; $failure = $null; $finished = $false
 $mutex = $null; $mutexOwned = $false; $bitLockerVolume = $null; $finalC = $null
 $script:state = [ordered]@{
-    ToolVersion = '3.0.2'; ComputerName = $env:COMPUTERNAME; StartedUtc = [DateTime]::UtcNow.ToString('o')
-    AllowPendingCleanupRequested = [bool]$AllowPendingCleanup
+    ToolVersion = '3.0.3'; ComputerName = $env:COMPUTERNAME; StartedUtc = [DateTime]::UtcNow.ToString('o')
+    AllowPendingCleanupRequested = [bool]$AllowPendingCleanup; AllowUninstalledBitLockerRequested = [bool]$AllowUninstalledBitLocker
     UpdatedUtc = ''; Stage = 'preflight'; Result = 'InProgress'; RequestedPlacement = $Placement
     Plan = $null; OriginalC = $null; OriginalRecovery = $null; NewRecovery = $null
     CreationAttempted = $false; NewWinREVerified = $false; OldDeletionAttempted = $false; OldDeleted = $false
@@ -1010,7 +1037,7 @@ try {
     $plan = Get-LayoutPlan $script:disk $c $script:originalParts $location $recoveryBytes -Placement $Placement
     $script:state.Plan = $plan | Select-Object Action, SelectedPlacement, RecoveryOffset, RecoverySize, CGrowthLimit, ExpectedCSize, GainBytes, PlacementReason
     $script:state.OriginalC = $script:cIdentity; $script:state.OriginalRecovery = $script:oldIdentity
-    Write-Host "`nWinRE Relocator 3.0.2 - $(if ($Apply) {'APPLY'} else {'PREVIEW'})" -ForegroundColor Cyan
+    Write-Host "`nWinRE Relocator 3.0.3 - $(if ($Apply) {'APPLY'} else {'PREVIEW'})" -ForegroundColor Cyan
     Write-Host "Disk $($script:disk.Number) ($($script:disk.PartitionStyle)); requested placement: $Placement"
     $script:originalParts | Format-Table PartitionNumber, DriveLetter, Type,
         @{N='MiB';E={[Math]::Round($_.Size / 1MB, 1)}}, Offset -AutoSize | Out-Host

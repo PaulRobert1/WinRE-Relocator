@@ -59,7 +59,8 @@ $testFiles = @(
     'Test-WinREIdentityAndManifest.ps1',
     'Test-WinRENativeAndAttributes.ps1',
     'Test-WinREVolumeGuidPaths.ps1',
-    'Test-WinREPendingMaintenance.ps1'
+    'Test-WinREPendingMaintenance.ps1',
+    'Test-WinREBitLockerFeature.ps1'
 )
 $results = @()
 foreach ($testFile in $testFiles) {

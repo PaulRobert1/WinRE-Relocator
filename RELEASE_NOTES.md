@@ -1,5 +1,15 @@
 # Release notes
 
+## v3.0.4 source correction — MBR primary partition creation
+
+The previous MBR creation through New-Partition produced an extended MBR partition (0x0F) and a logical 1 GiB partition in the affected Windows Server environment. The script stopped at topology validation before formatting or WinRE handover; the original three-partition layout must be restored before any retry.
+
+The corrected path invokes DiskPart `create partition primary size=<MiB> offset=<KiB> id=07` and checks that the original three partitions are unchanged, exactly one matching fourth primary partition exists, and **no extended or logical container** was created. Only then does it assign the temporary drive letter and proceed toward formatting. GPT creation is unchanged.
+
+**Do not retry -Apply with any residual partition 0 or 4.** Inspect the failed-operation journal and verify the rollback. Validate the entire operation on a disposable VM clone before production use.
+
+[CI tests](https://github.com/PaulRobert1/WinRE-Relocator/actions/runs/45176925518): Windows PowerShell 5.1 **335 passed, 0 failed, 1 skipped**; Linux PowerShell 7 **314 passed, 0 failed, 2 skipped**. The 10 new tests cover the exact observed extended/logical layout and primary creation commands. These are helper and simulated-layout tests; **live partition creation, REAgentC registration, BitLocker handling, recovery boot, and rollback are not end-to-end validated**.
+
 ## v3.0.3 (source hotfix)
 
 Explicit `-AllowUninstalledBitLocker` option for the exact Windows Server configuration in which BitLocker is not installed and the MicrosoftVolumeEncryption CIM provider and manage-bde.exe are absent. The default refuses unknown encryption states. The new option does not independently prove decryption and must not be treated as a safe override on encrypted volumes.

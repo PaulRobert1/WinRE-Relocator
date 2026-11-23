@@ -4,11 +4,36 @@
 
 WinRE Relocator is a standalone PowerShell script that creates and verifies a replacement recovery partition before deleting the original. It can use an existing unallocated gap before C: or unallocated space at the end of the disk. It never moves the beginning of C: or initiates or schedules a reboot.
 
-**[Download Move-WinRE-ExtendC.ps1 — v3.0.2](https://github.com/PaulRobert1/WinRE-Relocator/releases/download/v3.0.2/Move-WinRE-ExtendC.ps1)**
+**[Latest corrected source — v3.0.4](https://github.com/PaulRobert1/WinRE-Relocator/blob/main/Move-WinRE-ExtendC.ps1)** (source file; older v3.0.2 release asset does not contain this fix).
 
 [Full operations guide](docs/OPERATIONS.txt) · [Validation record](docs/VALIDATION.txt) · [Release notes](RELEASE_NOTES.md)
 
-> **Validation status:** The nine helper suites passed **318 checks on Windows PowerShell 5.1** and **297 checks on Linux PowerShell 7**, with zero failures. One Windows fixture and two Linux fixtures were skipped; see the results below. Pending-maintenance checks use mocked registry reads. Real partition changes, WinRE registration, BitLocker operations, REAgentC rollback registration, and recovery boot have **not** been integration tested. Validate the tool on a disposable Windows clone before production use.
+> **Validation status:** The current eleven helper suites passed **335 checks on Windows PowerShell 5.1** and **314 checks on Linux PowerShell 7**, with zero failures. One Windows fixture and two Linux fixtures were skipped; see the results below. Pending-maintenance checks use mocked registry reads. Real partition changes, WinRE registration, BitLocker operations, REAgentC rollback registration, and recovery boot have **not** been integration tested. Validate the tool on a disposable Windows clone before production use.
+
+## v3.0.4: MBR primary creation correction
+
+The reported Windows Server 2022 MBR layout contained three primary partitions. The previous `New-Partition -MbrType IFS` call created an extended container (partition 0) and a logical partition, rather than the intended fourth primary partition. The operation correctly stopped before formatting, WinRE handover, deletion, or C: extension.
+
+On MBR disks, the revised code now invokes Microsoft DiskPart's explicit `create partition primary size=<MiB> offset=<KiB> id=07` command. It checks that the original three partitions remain unchanged, that the new partition exactly matches the planned offset and size, and that there are **four primary partitions with no extended/logical container** before assigning its temporary letter or formatting. If the platform still produces another topology, the script stops without formatting. GPT creation is unchanged.
+
+**The failed operation must be rolled back first.** On the affected machine, run the following read-only check. It must report exactly three partitions before using the corrected script:
+
+```powershell
+reagentc /info
+Get-Partition -DiskNumber 0 | Sort-Object Offset | Format-Table PartitionNumber, DriveLetter, MbrType, Size, Offset
+```
+
+Expected offsets and sizes for the original three partitions:
+
+| Partition | Offset (bytes) | Size (bytes) | MBR type |
+|---|---:|---:|---|
+| 1 | 1048576 | 104857600 | 7 |
+| 2 (C:) | 105906176 | 85242937344 | 7 |
+| 3 (WinRE) | 85348843520 | 548405248 | 39 (0x27) |
+
+If an extended partition 0 or a new partition 4 remains, **do not run -Apply again**. Inspect the existing operation journal and finish recovery separately. The script does not automatically remove previously created partitions or resume partial operations.
+
+The new helper tests cover exact command arguments and refusal of the five-object extended/logical topology. The [validation run](https://github.com/PaulRobert1/WinRE-Relocator/actions/runs/45176925518) completed with 335 passing checks on Windows PowerShell 5.1 and 314 on Linux, with zero failures (one/two skips respectively). It does **not** test an actual DiskPart primary creation, WinRE handover, or recovery boot. Test the complete operation on a disposable VM clone before production use.
 
 ## v3.0.3 candidate: optional BitLocker-provider exception
 
